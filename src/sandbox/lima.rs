@@ -1,0 +1,1250 @@
+// Copyright 2026 tappunk
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+use crate::sandbox::Runtime;
+use crate::{config, lifecycle, ui};
+
+use super::{BackendRuntimeContract, ProfileSettings, SandboxBackend, SandboxEntry};
+
+use std::fmt::Write;
+use std::fs::OpenOptions;
+use std::io::IsTerminal;
+use std::io::Write as IoWrite;
+use std::path::{Path, PathBuf};
+use std::process::Stdio;
+use std::time::Instant;
+use tokio::fs;
+use tokio::process::Command;
+
+const SAFE_ENV_ALLOWLIST: &[&str] = &["TERM", "COLORTERM", "COLUMNS", "LINES"];
+
+#[derive(Debug, Clone)]
+struct LimaProfileSettings {
+    cpus: u32,
+    memory: String,
+    disk_gib: u32,
+    workspace_guest_path: String,
+}
+
+struct TerminalStateGuard {
+    fds: Vec<(i32, libc::termios)>,
+}
+
+impl TerminalStateGuard {
+    fn capture() -> Self {
+        let mut fds = Vec::new();
+
+        for fd in [libc::STDIN_FILENO, libc::STDOUT_FILENO, libc::STDERR_FILENO] {
+            let is_tty = unsafe { libc::isatty(fd) } == 1;
+            if !is_tty {
+                continue;
+            }
+
+            let mut termios = unsafe { std::mem::zeroed::<libc::termios>() };
+            let ok = unsafe { libc::tcgetattr(fd, &mut termios as *mut libc::termios) } == 0;
+            if ok {
+                fds.push((fd, termios));
+            }
+        }
+
+        Self { fds }
+    }
+}
+
+impl Drop for TerminalStateGuard {
+    fn drop(&mut self) {
+        for (fd, termios) in &self.fds {
+            let _ = unsafe { libc::tcsetattr(*fd, libc::TCSANOW, termios as *const libc::termios) };
+        }
+    }
+}
+
+fn lima_dir() -> PathBuf {
+    PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".lima")
+}
+
+fn lima_instance_dir(name: &str) -> PathBuf {
+    lima_dir().join(name)
+}
+
+fn yaml_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
+fn generate_lima_yaml(host_mount_path: &Path, settings: &LimaProfileSettings) -> String {
+    let mut yaml = String::new();
+    writeln!(yaml, "# tnk-managed instance").unwrap();
+    writeln!(yaml, "base: template:default").unwrap();
+    writeln!(yaml, "vmType: vz").unwrap();
+    writeln!(yaml, "arch: aarch64").unwrap();
+    writeln!(yaml, "cpus: {}", settings.cpus).unwrap();
+    writeln!(yaml, "memory: {}", settings.memory).unwrap();
+    writeln!(yaml, "disk: {}GiB", settings.disk_gib).unwrap();
+
+    writeln!(yaml, "mounts:").unwrap();
+    writeln!(
+        yaml,
+        "  - location: {}",
+        yaml_quote(&host_mount_path.display().to_string())
+    )
+    .unwrap();
+    writeln!(
+        yaml,
+        "    mountPoint: {}",
+        yaml_quote(&settings.workspace_guest_path)
+    )
+    .unwrap();
+    writeln!(yaml, "    writable: true").unwrap();
+
+    writeln!(yaml, "provision:").unwrap();
+    writeln!(yaml, "  - mode: system").unwrap();
+    writeln!(yaml, "    script: |").unwrap();
+    writeln!(yaml, "      #!/bin/bash").unwrap();
+    writeln!(yaml, "      set -eux -o pipefail").unwrap();
+    writeln!(yaml, "      export DEBIAN_FRONTEND=noninteractive").unwrap();
+    writeln!(yaml, "      apt-get update -qq").unwrap();
+    writeln!(
+        yaml,
+        "      apt-get install -y -qq bash curl ca-certificates sudo git rsync"
+    )
+    .unwrap();
+    writeln!(yaml, "      if ! id -u tnk >/dev/null 2>&1; then").unwrap();
+    writeln!(yaml, "        useradd -m -s /bin/bash tnk").unwrap();
+    writeln!(yaml, "      fi").unwrap();
+    writeln!(yaml, "      usermod -aG sudo tnk").unwrap();
+    writeln!(yaml, "      install -d -m 755 /etc/sudoers.d").unwrap();
+    writeln!(
+        yaml,
+        "      printf 'tnk ALL=(ALL) NOPASSWD:ALL\\n' >/etc/sudoers.d/tnk"
+    )
+    .unwrap();
+    writeln!(yaml, "      chmod 0440 /etc/sudoers.d/tnk").unwrap();
+    writeln!(yaml, "      mkdir -p /var/lib/tnk").unwrap();
+    writeln!(yaml, "      touch /var/lib/tnk/lima-baseline-v2").unwrap();
+
+    writeln!(yaml, "ssh:").unwrap();
+    writeln!(yaml, "  loadDotSSHPubKeys: false").unwrap();
+    yaml
+}
+
+fn instance_yaml_path(name: &str) -> PathBuf {
+    lima_instance_dir(name).join("lima.yaml")
+}
+
+fn instance_dir(name: &str) -> PathBuf {
+    lima_instance_dir(name)
+}
+
+fn generated_template_path(name: &str) -> PathBuf {
+    PathBuf::from(std::env::var("HOME").unwrap_or_default())
+        .join(".cache/tnk/lima")
+        .join(format!("{}.yaml", name))
+}
+
+async fn instance_exists(name: &str) -> bool {
+    instance_yaml_path(name).exists()
+}
+
+async fn instance_is_running(name: &str) -> Result<bool, color_eyre::Report> {
+    let output = Command::new("limactl")
+        .args(["list", "--format", "{{.Status}}", name])
+        .output()
+        .await?;
+
+    if !output.status.success() {
+        return Ok(false);
+    }
+
+    let status = String::from_utf8_lossy(&output.stdout);
+    Ok(status.trim().eq_ignore_ascii_case("running"))
+}
+
+async fn stale_hostagent_pids(id: &str) -> Result<Vec<u32>, color_eyre::Report> {
+    let pattern = format!("limactl hostagent .* {}$", id);
+    let output = Command::new("pgrep")
+        .args(["-f", &pattern])
+        .output()
+        .await?;
+
+    if !output.status.success() {
+        return Ok(Vec::new());
+    }
+
+    let mut pids = Vec::new();
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        if let Ok(pid) = line.trim().parse::<u32>() {
+            pids.push(pid);
+        }
+    }
+    Ok(pids)
+}
+
+async fn cleanup_stale_hostagents(id: &str) -> Result<(), color_eyre::Report> {
+    if instance_is_running(id).await? {
+        return Ok(());
+    }
+
+    let pids = stale_hostagent_pids(id).await?;
+    if pids.is_empty() {
+        return Ok(());
+    }
+
+    for pid in pids {
+        let _ = Command::new("kill")
+            .args(["-9", &pid.to_string()])
+            .output()
+            .await;
+    }
+
+    Ok(())
+}
+
+async fn create_and_start_instance(
+    id: &str,
+    host_mount_path: &Path,
+    settings: &LimaProfileSettings,
+) -> Result<(), color_eyre::Report> {
+    cleanup_stale_hostagents(id).await?;
+    let template = generate_lima_yaml(host_mount_path, settings);
+    let template_path = generated_template_path(id);
+    if let Some(parent) = template_path.parent() {
+        fs::create_dir_all(parent).await?;
+    }
+    fs::write(&template_path, template).await?;
+
+    if ui::is_verbose() {
+        let mut cmd = Command::new("limactl");
+        cmd.args(["--tty=false", "start", "--name", id])
+            .arg(&template_path)
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit());
+
+        match tokio::time::timeout(std::time::Duration::from_secs(300), cmd.status()).await {
+            Ok(Ok(status)) => {
+                if !status.success() {
+                    return Err(color_eyre::eyre::eyre!(
+                        "failed to create/start lima instance '{}'",
+                        id
+                    ));
+                }
+            }
+            Ok(Err(err)) => return Err(err.into()),
+            Err(_) => {
+                if !instance_is_running(id).await? {
+                    return Err(color_eyre::eyre::eyre!(
+                        "timed out creating/starting lima instance '{}'",
+                        id
+                    ));
+                }
+            }
+        }
+    } else {
+        let mut cmd = Command::new("limactl");
+        cmd.args(["--tty=false", "start", "--name", id])
+            .arg(&template_path);
+
+        match tokio::time::timeout(std::time::Duration::from_secs(300), cmd.output()).await {
+            Ok(Ok(out)) => {
+                if !out.status.success() {
+                    let stderr = String::from_utf8_lossy(&out.stderr);
+                    return Err(color_eyre::eyre::eyre!(
+                        "failed to create/start lima instance '{}': {}",
+                        id,
+                        stderr.lines().take(8).collect::<Vec<_>>().join("\n")
+                    ));
+                }
+            }
+            Ok(Err(err)) => return Err(err.into()),
+            Err(_) => {
+                if !instance_is_running(id).await? {
+                    return Err(color_eyre::eyre::eyre!(
+                        "timed out creating/starting lima instance '{}'",
+                        id
+                    ));
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+async fn start_existing_instance(id: &str) -> Result<(), color_eyre::Report> {
+    cleanup_stale_hostagents(id).await?;
+
+    if ui::is_verbose() {
+        let mut cmd = Command::new("limactl");
+        cmd.args(["--tty=false", "start", id])
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit());
+
+        match tokio::time::timeout(std::time::Duration::from_secs(240), cmd.status()).await {
+            Ok(Ok(status)) => {
+                if !status.success() {
+                    return Err(color_eyre::eyre::eyre!(
+                        "failed to start lima instance '{}'",
+                        id
+                    ));
+                }
+            }
+            Ok(Err(err)) => return Err(err.into()),
+            Err(_) => {
+                if !instance_is_running(id).await? {
+                    return Err(color_eyre::eyre::eyre!(
+                        "timed out starting lima instance '{}'",
+                        id
+                    ));
+                }
+            }
+        }
+    } else {
+        let mut cmd = Command::new("limactl");
+        cmd.args(["--tty=false", "start", id]);
+
+        match tokio::time::timeout(std::time::Duration::from_secs(240), cmd.output()).await {
+            Ok(Ok(out)) => {
+                if !out.status.success() {
+                    let stderr = String::from_utf8_lossy(&out.stderr);
+                    return Err(color_eyre::eyre::eyre!(
+                        "failed to start lima instance '{}': {}",
+                        id,
+                        stderr.lines().take(8).collect::<Vec<_>>().join("\n")
+                    ));
+                }
+            }
+            Ok(Err(err)) => return Err(err.into()),
+            Err(_) => {
+                if !instance_is_running(id).await? {
+                    return Err(color_eyre::eyre::eyre!(
+                        "timed out starting lima instance '{}'",
+                        id
+                    ));
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+pub struct LimaBackend;
+
+#[async_trait::async_trait]
+impl SandboxBackend for LimaBackend {
+    const BINARY: &'static str = "limactl";
+
+    async fn resolve_id() -> Result<(String, PathBuf, PathBuf), color_eyre::Report> {
+        super::container::resolve_workspace_context()
+    }
+
+    async fn start(
+        profile_name: String,
+        audit_log: Option<String>,
+        settings: &ProfileSettings,
+        _runtime_envs: &[(String, String)],
+    ) -> Result<(), color_eyre::Report> {
+        let (id, project_root, _) = Self::resolve_id().await?;
+        let _audit = resolve_audit_logger(audit_log, &id)?;
+        let _lock =
+            lifecycle::acquire("lima-lifecycle", std::time::Duration::from_secs(20)).await?;
+
+        ui::log_info(&format!("target: {}", id));
+
+        let lima_settings = lima_settings_from_profile_settings(settings)?;
+        let needs_provision = profile_name != "base";
+
+        if !instance_exists(&id).await {
+            ui::log_info("creating lima instance");
+            if !ui::is_quiet() {
+                eprintln!("creating sandbox {}...", id);
+            }
+            create_and_start_instance(&id, &project_root, &lima_settings).await?;
+            ui::log_info(&format!("started {}", id));
+        } else if !instance_is_running(&id).await? {
+            if !ui::is_quiet() {
+                eprintln!("starting sandbox {}...", id);
+            }
+            start_existing_instance(&id).await?;
+            ui::log_info(&format!("started {}", id));
+        }
+
+        let started_at = Instant::now();
+        while started_at.elapsed().as_secs() < 120 {
+            if instance_is_running(&id).await? {
+                break;
+            }
+            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+        }
+        if !instance_is_running(&id).await? {
+            return Err(color_eyre::eyre::eyre!(
+                "timed out waiting for lima instance '{}' to become running",
+                id
+            ));
+        }
+
+        let home = std::env::var("HOME")?;
+
+        if needs_provision {
+            if !ui::is_quiet() {
+                eprintln!("resolving engine model...");
+            }
+            let cfg = config::load()?;
+            let server_port = cfg.server_port.unwrap_or(8080);
+            let engine_name = cfg.default_engine_runtime.as_deref().unwrap_or("llama");
+            let (active_model, ctx_window) =
+                crate::sandbox::shared::resolve_active_model_and_ctx_impl(
+                    &home,
+                    server_port,
+                    engine_name,
+                )
+                .await;
+
+            let cache_dir = PathBuf::from(&home)
+                .join(".cache/tnk")
+                .join(format!("{}-profiles", id));
+
+            ui::log_info(&format!("applying profile: {}", profile_name));
+            if !ui::is_quiet() {
+                eprintln!("provisioning profile '{}'...", profile_name);
+            }
+
+            run_provision_lima(
+                &id,
+                &profile_name,
+                engine_name,
+                &active_model,
+                ctx_window,
+                &lima_settings.workspace_guest_path,
+                server_port,
+            )
+            .await?;
+
+            if !cache_dir.exists() {
+                let Some(cache_parent) = cache_dir.parent() else {
+                    return Err(color_eyre::eyre::eyre!("invalid profile cache path"));
+                };
+                fs::create_dir_all(cache_parent).await?;
+                fs::write(&cache_dir, format!("{}\n", profile_name)).await?;
+            } else {
+                let mut existing = fs::read_to_string(&cache_dir).await.unwrap_or_default();
+                if !existing.lines().any(|l| l.trim() == profile_name) {
+                    if !existing.is_empty() && !existing.ends_with('\n') {
+                        existing.push('\n');
+                    }
+                    existing.push_str(&profile_name);
+                    existing.push('\n');
+                    fs::write(&cache_dir, existing).await?;
+                }
+            }
+
+            ui::log_info("launching workspace context");
+            if !ui::is_quiet() {
+                eprintln!("sandbox ready");
+            }
+        } else {
+            let cache_dir = PathBuf::from(&home)
+                .join(".cache/tnk")
+                .join(format!("{}-profiles", id));
+            if !cache_dir.exists() {
+                let Some(cache_parent) = cache_dir.parent() else {
+                    return Err(color_eyre::eyre::eyre!("invalid profile cache path"));
+                };
+                fs::create_dir_all(cache_parent).await?;
+                fs::write(&cache_dir, "base\n").await?;
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn shell(
+        profile: Option<String>,
+        command: Option<String>,
+        no_tty: bool,
+        explicit_envs: Vec<String>,
+        audit_log: Option<String>,
+        settings: &ProfileSettings,
+        runtime_envs: &[(String, String)],
+    ) -> Result<(), color_eyre::Report> {
+        let use_tty = std::io::stdin().is_terminal()
+            && std::io::stdout().is_terminal()
+            && std::io::stderr().is_terminal();
+        let requires_tty = !no_tty;
+
+        if requires_tty && !use_tty {
+            return Err(color_eyre::eyre::eyre!(
+                "interactive TTY is required; use --no-tty for non-interactive commands"
+            ));
+        }
+
+        let parsed_envs: Vec<(String, String)> = explicit_envs
+            .iter()
+            .map(|entry| crate::sandbox::shared::parse_explicit_env(entry))
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let (id, project_root, workdir) = Self::resolve_id().await?;
+        if id == "tnk-config" {
+            return Err(color_eyre::eyre::eyre!(
+                "sandbox shell is only available inside a project directory"
+            ));
+        }
+
+        let _lock =
+            lifecycle::acquire("lima-lifecycle", std::time::Duration::from_secs(20)).await?;
+
+        let default_settings = lima_settings_from_profile_settings(settings)?;
+
+        if !instance_exists(&id).await {
+            ui::log_info("creating lima instance");
+            create_and_start_instance(&id, &project_root, &default_settings).await?;
+            ui::log_info(&format!("started {}", id));
+        } else if !instance_is_running(&id).await? {
+            start_existing_instance(&id).await?;
+            ui::log_info(&format!("started {}", id));
+        }
+
+        if let Some(profile_name) = profile.as_deref()
+            && profile_name != "base"
+        {
+            let home = std::env::var("HOME")?;
+            let cfg = config::load()?;
+            let server_port = cfg.server_port.unwrap_or(8080);
+            let engine_name = cfg.default_engine_runtime.as_deref().unwrap_or("llama");
+            let (active_model, ctx_window) =
+                crate::sandbox::shared::resolve_active_model_and_ctx_impl(
+                    &home,
+                    server_port,
+                    engine_name,
+                )
+                .await;
+
+            let cache_dir = PathBuf::from(&home)
+                .join(".cache/tnk")
+                .join(format!("{}-profiles", id));
+
+            ui::log_info(&format!("applying profile: {}", profile_name));
+
+            run_provision_lima(
+                &id,
+                profile_name,
+                engine_name,
+                &active_model,
+                ctx_window,
+                &settings.workspace_guest_path,
+                server_port,
+            )
+            .await?;
+
+            if !cache_dir.exists() {
+                let Some(cache_parent) = cache_dir.parent() else {
+                    return Err(color_eyre::eyre::eyre!("invalid profile cache path"));
+                };
+                fs::create_dir_all(cache_parent).await?;
+                fs::write(&cache_dir, format!("{}\n", profile_name)).await?;
+            }
+        }
+
+        let audit = resolve_audit_logger(audit_log, &id)?;
+
+        let guest_mount_root = PathBuf::from(&settings.workspace_guest_path);
+        let guest_workdir = match workdir.strip_prefix(&project_root) {
+            Ok(relative_workdir) => guest_mount_root.join(relative_workdir),
+            Err(_) => guest_mount_root,
+        };
+        let guest_workdir_str = guest_workdir
+            .to_str()
+            .ok_or_else(|| color_eyre::eyre::eyre!("guest workdir contains invalid UTF-8"))?;
+
+        let mut shell_parts = Vec::new();
+
+        shell_parts.push(format!("cd {} || exit 1", shell_escape(guest_workdir_str)));
+
+        for key in SAFE_ENV_ALLOWLIST {
+            if let Ok(value) = std::env::var(key) {
+                shell_parts.push(format!("export {}={}", key, shell_escape(&value)));
+            }
+        }
+
+        for (key, value) in runtime_envs {
+            shell_parts.push(format!("export {}={}", key, shell_escape(value)));
+        }
+
+        for (key, value) in &parsed_envs {
+            shell_parts.push(format!("export {}={}", key, shell_escape(value)));
+        }
+
+        match command {
+            Some(cmd) => {
+                shell_parts.push(format!("exec bash -lc {}", shell_escape(&cmd)));
+            }
+            None => {
+                shell_parts.push("exec bash -l".to_string());
+            }
+        }
+
+        let script = shell_parts.join(" && ");
+
+        if let Some(logger) = &audit {
+            logger.write_event(serde_json::json!({
+                "event": "session_start",
+                "ts": crate::sandbox::shared::now_unix_seconds(),
+                "container_id": id,
+                "workdir": guest_workdir_str,
+                "tty": use_tty && requires_tty,
+                "requires_tty": requires_tty,
+                "runtime_env": crate::sandbox::shared::runtime_env_summary(runtime_envs),
+            }))?;
+            logger.write_event(serde_json::json!({
+                "event": "exec_invocation",
+                "ts": crate::sandbox::shared::now_unix_seconds(),
+                "container_id": id,
+                "argv": vec!["limactl".to_string(), "shell".to_string(), id.clone(), "--".to_string(), script.clone()],
+                "tty": use_tty && requires_tty,
+                "runtime_env": crate::sandbox::shared::runtime_env_summary(runtime_envs),
+            }))?;
+        }
+
+        let _terminal_state_guard = (use_tty && requires_tty).then(TerminalStateGuard::capture);
+
+        let mut child_cmd = Command::new("limactl");
+        child_cmd
+            .args([
+                "shell",
+                "--workdir",
+                guest_workdir_str,
+                &id,
+                "bash",
+                "-lc",
+                &script,
+            ])
+            .stdin(Stdio::inherit())
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit());
+
+        let mut child = child_cmd.spawn()?;
+        let status = child.wait().await?;
+
+        if let Some(logger) = &audit {
+            logger.write_event(serde_json::json!({
+                "event": "session_exit",
+                "ts": crate::sandbox::shared::now_unix_seconds(),
+                "container_id": id,
+                "exit_code": status.code(),
+            }))?;
+        }
+
+        if status.success() {
+            return Ok(());
+        }
+
+        std::process::exit(status.code().unwrap_or(1));
+    }
+
+    async fn stop(names: Vec<String>, all: bool) -> Result<(), color_eyre::Report> {
+        if all {
+            let instances = discover_managed_lima_instances().await;
+            if instances.is_empty() {
+                ui::log_info("no managed lima instances found");
+                return Ok(());
+            }
+
+            let _lock =
+                lifecycle::acquire("lima-lifecycle", std::time::Duration::from_secs(20)).await?;
+
+            for id in instances {
+                stop_lima_instance_by_id(&id).await?;
+            }
+            return Ok(());
+        }
+
+        if !names.is_empty() {
+            let mut unique = names;
+            unique.sort();
+            unique.dedup();
+
+            let _lock =
+                lifecycle::acquire("lima-lifecycle", std::time::Duration::from_secs(20)).await?;
+
+            for id in unique {
+                validate_named_lima_sandbox(&id)?;
+                if !instance_exists(&id).await {
+                    eprintln!("warning: lima instance '{}' does not exist", id);
+                    continue;
+                }
+                stop_lima_instance_by_id(&id).await?;
+            }
+            return Ok(());
+        }
+
+        stop_lima_instance().await
+    }
+
+    async fn delete(id: &str, force: bool) -> Result<(), color_eyre::Report> {
+        delete_lima_instance(id, force).await
+    }
+
+    async fn ls() -> Result<Vec<SandboxEntry>, color_eyre::Report> {
+        list_lima_instances().await
+    }
+
+    async fn exists(id: &str) -> Result<bool, color_eyre::Report> {
+        Ok(instance_exists(id).await)
+    }
+
+    async fn is_running(id: &str) -> Result<bool, color_eyre::Report> {
+        Ok(instance_is_running(id).await?)
+    }
+
+    async fn cleanup_untracked(verbose: bool) -> Result<(), color_eyre::Report> {
+        let home = std::env::var("HOME")?;
+        let cache_dir = PathBuf::from(home).join(".cache/tnk");
+
+        if !cache_dir.exists() {
+            if verbose {
+                eprintln!(
+                    "warning: sandbox cache directory is missing; skipping untracked cleanup"
+                );
+            }
+            return Ok(());
+        }
+
+        let output = Command::new("limactl")
+            .args(["list", "--format", "{{.Name}}"])
+            .output()
+            .await?;
+
+        if !output.status.success() {
+            if verbose {
+                eprintln!("warning: failed to list lima instances for cleanup");
+            }
+            return Ok(());
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        for line in stdout.lines().filter(|l| !l.is_empty()) {
+            let id = line.trim();
+            if !id.starts_with("tnk-") {
+                continue;
+            }
+
+            let profile_cache = cache_dir.join(format!("{}-profiles", id));
+            if profile_cache.exists() {
+                continue;
+            }
+
+            let is_running = instance_is_running(id).await?;
+            if is_running {
+                if verbose {
+                    eprintln!("info: skipping running untracked lima instance {}", id);
+                }
+                continue;
+            }
+
+            if verbose {
+                eprintln!(
+                    "warning: detected unlabeled lima instance {} without profile cache; skipping auto-delete for safety",
+                    id
+                );
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn provision(
+        id: &str,
+        profile_name: &str,
+        engine_runtime: &str,
+        model_name: &str,
+        ctx_window: u32,
+        _mount_point: &Path,
+        port: u16,
+        settings: &ProfileSettings,
+    ) -> Result<(), color_eyre::Report> {
+        run_provision_lima(
+            id,
+            profile_name,
+            engine_runtime,
+            model_name,
+            ctx_window,
+            &settings.workspace_guest_path,
+            port,
+        )
+        .await
+    }
+
+    async fn build_golden_image(profile_name: String) -> Result<(), color_eyre::Report> {
+        let _ = profile_name;
+        Ok(())
+    }
+
+    async fn resolve_gateway(_id: &str) -> Result<String, color_eyre::Report> {
+        Ok("host.lima.internal".to_string())
+    }
+
+    async fn runtime_env(
+        id: &str,
+        port: u16,
+        engine_runtime: &str,
+        model_name: &str,
+    ) -> Result<Vec<(String, String)>, color_eyre::Report> {
+        let host_gateway = Self::resolve_gateway(id).await?;
+        let inference_url = Runtime::inference_url(&host_gateway, port);
+        let mcp_bridge_url = Runtime::mcp_bridge_url(&host_gateway);
+        let searxng_url = Runtime::searxng_url(&host_gateway);
+
+        Ok(vec![
+            ("TNK_INFERENCE_URL".to_string(), inference_url.clone()),
+            ("TNK_OPENAI_URL".to_string(), inference_url),
+            ("TNK_MCP_BRIDGE_URL".to_string(), mcp_bridge_url),
+            ("TNK_SEARXNG_URL".to_string(), searxng_url),
+            ("TNK_MODEL_NAME".to_string(), model_name.to_string()),
+            ("TNK_ENGINE_RUNTIME".to_string(), engine_runtime.to_string()),
+        ])
+    }
+
+    async fn resolve_active_model_and_ctx(
+        port: u16,
+        engine_runtime: &str,
+    ) -> Result<(String, u32), color_eyre::Report> {
+        let home = std::env::var("HOME")?;
+        Ok(
+            crate::sandbox::shared::resolve_active_model_and_ctx_impl(&home, port, engine_runtime)
+                .await,
+        )
+    }
+}
+
+fn lima_settings_from_profile_settings(
+    settings: &ProfileSettings,
+) -> Result<LimaProfileSettings, color_eyre::Report> {
+    if settings.network_none {
+        return Err(color_eyre::eyre::eyre!(
+            "lima backend does not support network=none or network=restricted"
+        ));
+    }
+
+    Ok(LimaProfileSettings {
+        cpus: settings.cpus.unwrap_or(4),
+        memory: settings
+            .memory
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or("4GiB")
+            .to_string(),
+        disk_gib: 50,
+        workspace_guest_path: settings.workspace_guest_path.clone(),
+    })
+}
+
+fn shell_escape(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+#[derive(serde::Deserialize, Debug, Clone)]
+struct AuditLogger {
+    path: PathBuf,
+}
+
+fn resolve_audit_logger(
+    audit_log: Option<String>,
+    id: &str,
+) -> Result<Option<AuditLogger>, color_eyre::Report> {
+    let Some(path_str) = audit_log else {
+        return Ok(None);
+    };
+
+    let path = if path_str.trim().is_empty() {
+        let home = std::env::var("HOME")?;
+        let audit_dir = PathBuf::from(home).join(".cache/tnk/audit");
+        std::fs::create_dir_all(&audit_dir)?;
+        let ts = crate::sandbox::shared::now_unix_seconds();
+        audit_dir.join(format!("{}-{}.ndjson", ts, id))
+    } else {
+        PathBuf::from(path_str)
+    };
+
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    Ok(Some(AuditLogger { path }))
+}
+
+impl AuditLogger {
+    fn write_event(&self, event: serde_json::Value) -> Result<(), color_eyre::Report> {
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)?;
+        let serialized = serde_json::to_string(&event)?;
+        writeln!(file, "{}", serialized)?;
+        Ok(())
+    }
+}
+
+async fn stop_lima_instance() -> Result<(), color_eyre::Report> {
+    let _lock = lifecycle::acquire("lima-lifecycle", std::time::Duration::from_secs(20)).await?;
+    let (id, _, _) = LimaBackend::resolve_id().await?;
+
+    stop_lima_instance_by_id(&id).await
+}
+
+async fn stop_lima_instance_by_id(id: &str) -> Result<(), color_eyre::Report> {
+    if !instance_exists(id).await {
+        return Ok(());
+    }
+
+    if !instance_is_running(id).await? {
+        ui::log_info(&format!("already stopped {}", id));
+        return Ok(());
+    }
+
+    let graceful = tokio::time::timeout(
+        std::time::Duration::from_secs(20),
+        Command::new("limactl").args(["stop", id]).output(),
+    )
+    .await;
+
+    let graceful_ok = match graceful {
+        Ok(Ok(output)) => output.status.success(),
+        Ok(Err(_)) | Err(_) => false,
+    };
+
+    if !graceful_ok && instance_is_running(id).await? {
+        let force = tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            Command::new("limactl")
+                .args(["stop", "--force", id])
+                .output(),
+        )
+        .await;
+
+        match force {
+            Ok(Ok(output)) if output.status.success() => {}
+            Ok(Ok(_)) | Ok(Err(_)) | Err(_) => {
+                if instance_is_running(id).await? {
+                    return Err(color_eyre::eyre::eyre!(
+                        "failed to stop lima instance '{}'",
+                        id
+                    ));
+                }
+            }
+        }
+    }
+
+    ui::log_info(&format!("stopped {}", id));
+    Ok(())
+}
+
+async fn delete_lima_instance(id: &str, force: bool) -> Result<(), color_eyre::Report> {
+    let _lock = lifecycle::acquire("lima-lifecycle", std::time::Duration::from_secs(20)).await?;
+
+    if !force && !std::io::stdout().is_terminal() {
+        eprintln!("error: terminal required for deletion, use --force to skip");
+        std::process::exit(77);
+    }
+
+    if !instance_exists(id).await {
+        return Ok(());
+    }
+
+    if instance_is_running(id).await? {
+        stop_lima_instance_by_id(id).await?;
+    }
+
+    let mut args = vec!["delete"];
+    if force {
+        args.push("--force");
+    }
+    args.push(id);
+
+    let output = Command::new("limactl").args(&args).output().await?;
+
+    if !output.status.success() {
+        return Err(color_eyre::eyre::eyre!(
+            "failed to delete lima instance '{}'",
+            id
+        ));
+    }
+
+    let yaml_path = instance_yaml_path(id);
+    let _ = fs::remove_file(&yaml_path).await;
+
+    let dir = instance_dir(id);
+    let _ = fs::remove_dir_all(&dir).await;
+
+    ui::log_info(&format!("deleted {}", id));
+    Ok(())
+}
+
+fn validate_named_lima_sandbox(id: &str) -> Result<(), color_eyre::Report> {
+    if !id.starts_with("tnk-") {
+        return Err(color_eyre::eyre::eyre!(
+            "invalid lima instance name '{}': must start with 'tnk-'",
+            id
+        ));
+    }
+    if id == "tnk-services" || id == "tnk-searxng" {
+        return Err(color_eyre::eyre::eyre!(
+            "'{}' is a services instance, not a project sandbox",
+            id
+        ));
+    }
+    Ok(())
+}
+
+async fn discover_managed_lima_instances() -> Vec<String> {
+    let output = Command::new("limactl")
+        .args(["list", "--format", "{{.Name}}"])
+        .output()
+        .await;
+
+    let stdout = match output {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).to_string(),
+        _ => String::new(),
+    };
+
+    let mut ids: Vec<String> = stdout
+        .lines()
+        .filter_map(|line| {
+            let id = line.trim().to_string();
+            if !id.starts_with("tnk-") {
+                return None;
+            }
+            if id == "tnk-services" || id == "tnk-searxng" {
+                return None;
+            }
+            Some(id)
+        })
+        .collect();
+
+    ids.sort();
+    ids.dedup();
+    ids
+}
+
+async fn list_lima_instances() -> Result<Vec<SandboxEntry>, color_eyre::Report> {
+    let output = Command::new("limactl")
+        .args(["list", "--format", "{{.Name}}\t{{.Status}}"])
+        .output()
+        .await?;
+
+    if !output.status.success() {
+        return Err(color_eyre::eyre::eyre!(
+            "failed to list lima instances (run 'limactl list' to check lima installation)"
+        ));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let entries: Vec<SandboxEntry> = stdout
+        .lines()
+        .filter_map(|line| {
+            let parts: Vec<&str> = line.split('\t').collect();
+            if parts.len() < 2 {
+                return None;
+            }
+            let id = parts[0].trim().to_string();
+            if !id.starts_with("tnk-") {
+                return None;
+            }
+            let status = {
+                let raw = parts[1].trim();
+                if raw.is_empty() {
+                    "unknown".to_string()
+                } else {
+                    raw.to_string()
+                }
+            };
+            Some(SandboxEntry {
+                id,
+                status,
+                mount: "/workspace".to_string(),
+            })
+        })
+        .collect();
+
+    Ok(entries)
+}
+
+async fn run_provision_lima(
+    id: &str,
+    script_name: &str,
+    engine_runtime: &str,
+    model_name: &str,
+    ctx_window: u32,
+    mount_path: &str,
+    port: u16,
+) -> Result<(), color_eyre::Report> {
+    fn validate_script_name(name: &str) -> Result<(), color_eyre::Report> {
+        if name.is_empty() {
+            return Err(color_eyre::eyre::eyre!("invalid profile name: empty"));
+        }
+        if name
+            .chars()
+            .any(|c| !(c.is_ascii_alphanumeric() || c == '-' || c == '_'))
+        {
+            return Err(color_eyre::eyre::eyre!(
+                "invalid profile name: unsupported characters"
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_engine_runtime(runtime: &str) -> Result<(), color_eyre::Report> {
+        if runtime.is_empty() {
+            return Err(color_eyre::eyre::eyre!("invalid runtime: empty"));
+        }
+        if runtime
+            .chars()
+            .any(|c| !(c.is_ascii_alphanumeric() || c == '-' || c == '_'))
+        {
+            return Err(color_eyre::eyre::eyre!(
+                "invalid runtime: unsupported characters"
+            ));
+        }
+        Ok(())
+    }
+
+    validate_script_name(script_name)?;
+    validate_engine_runtime(engine_runtime)?;
+
+    let home = std::env::var("HOME")?;
+    let host_script = PathBuf::from(&home).join(format!(
+        ".config/tnk/sandbox.d/container/provision.d/{}.sh",
+        script_name
+    ));
+
+    if !host_script.exists() {
+        return Err(color_eyre::eyre::eyre!(
+            "provision script not found: {:?}",
+            host_script
+        ));
+    }
+
+    let host_lib_dir = host_script
+        .parent()
+        .ok_or_else(|| color_eyre::eyre::eyre!("invalid provision script path"))?
+        .join("lib");
+    if !host_lib_dir.is_dir() {
+        return Err(color_eyre::eyre::eyre!(
+            "provision library directory not found: {:?}",
+            host_lib_dir
+        ));
+    }
+
+    let specs_rev =
+        crate::sandbox::shared::compute_specs_revision_hash(&host_script, &host_lib_dir).await?;
+
+    let guest_provision_dir = format!("/tmp/tnk-provision-{}", script_name);
+    let guest_script_path = format!("{}/{}.sh", guest_provision_dir, script_name);
+
+    let host_gateway = LimaBackend::resolve_gateway(id).await?;
+
+    ui::log_info(&format!("provisioning: {}", script_name));
+
+    let guest_lib_dir = format!("{}/lib", guest_provision_dir);
+    let guest_target_lib_dir = format!("{}:{}", id, guest_lib_dir);
+    let mkdir_output = Command::new("limactl")
+        .args(["shell", id, "--", "mkdir", "-p", &guest_lib_dir])
+        .output()
+        .await?;
+    if !mkdir_output.status.success() {
+        return Err(color_eyre::eyre::eyre!(
+            "failed to prepare guest provision directory for '{}'",
+            script_name
+        ));
+    }
+
+    let script_copy_output = Command::new("limactl")
+        .args(["copy"])
+        .arg(&host_script)
+        .arg(format!("{}:{}", id, guest_script_path))
+        .output()
+        .await?;
+    if !script_copy_output.status.success() {
+        return Err(color_eyre::eyre::eyre!(
+            "failed to copy provision script into lima guest for '{}'",
+            script_name
+        ));
+    }
+
+    let lib_copy_output = Command::new("limactl")
+        .args(["copy", "--recursive"])
+        .arg(&host_lib_dir)
+        .arg(&guest_target_lib_dir)
+        .output()
+        .await?;
+    if !lib_copy_output.status.success() {
+        return Err(color_eyre::eyre::eyre!(
+            "failed to copy provision library into lima guest for '{}'",
+            script_name
+        ));
+    }
+
+    let provision_cmd = format!(
+        r#"set -eu -o pipefail
+export TNK_OPENAI_URL=http://{}:{}/v1
+export TNK_INFERENCE_URL=http://{}:{}/v1
+export TNK_MCP_BRIDGE_URL=http://{}:18765
+export TNK_SEARXNG_URL=http://{}:18766
+export TNK_MODEL_NAME={}
+export TNK_CTX_WINDOW={}
+export TNK_WORKSPACE_MOUNT={}
+export TNK_SPECS_REV={}
+export TNK_CONTAINER_HOST_GATEWAY={}
+export TNK_ENGINE_RUNTIME={}
+bash {}"#,
+        host_gateway,
+        port,
+        host_gateway,
+        port,
+        host_gateway,
+        host_gateway,
+        shell_escape(model_name),
+        ctx_window,
+        shell_escape(mount_path),
+        shell_escape(&specs_rev),
+        shell_escape(&host_gateway),
+        shell_escape(engine_runtime),
+        shell_escape(&guest_script_path),
+    );
+
+    let provision_status = tokio::time::timeout(
+        std::time::Duration::from_secs(1800),
+        Command::new("limactl")
+            .args(["shell", id, "--", "bash", "-lc"])
+            .arg(provision_cmd)
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .status(),
+    )
+    .await
+    .map_err(|_| {
+        color_eyre::eyre::eyre!("provision timed out for '{}' after 1800s", script_name)
+    })??;
+
+    if !provision_status.success() {
+        return Err(color_eyre::eyre::eyre!(
+            "provision failed for '{}'",
+            script_name
+        ));
+    }
+
+    ui::log_info(&format!("provisioned: {}", script_name));
+    Ok(())
+}

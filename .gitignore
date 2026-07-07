@@ -1,0 +1,28 @@
+# Dependencies
+node_modules/
+
+# Build artifacts
+target/
+
+# Lock files
+*.lock
+
+# Environment secrets
+.env
+
+# Editor swap/backup files
+*~
+*.bak
+*.swp
+*.swo
+*.swpx
+
+# OS
+.DS_Store
+
+# Opencode config
+.opencode/
+
+# Project files
+AGENTS.md
+scripts/release.sh

@@ -345,12 +345,15 @@ async fn boot(preset: Option<String>, runtime: Option<String>) -> Result<(), col
         engine::start(&engine_name, preset, server_port, None, false).await?;
     }
 
-    if !crate::ui::is_quiet() {
-        eprintln!("starting services...");
-    }
-    services::start(false, None).await?;
-    if !crate::ui::is_quiet() {
-        eprintln!("services ready");
+    if cfg.services_auto_start.unwrap_or(true) {
+        if !crate::ui::is_quiet() {
+            eprintln!("starting services...");
+        }
+        if let Err(e) = services::start(false, None).await {
+            eprintln!("error: services failed to start: {e}");
+        } else if !crate::ui::is_quiet() {
+            eprintln!("services ready");
+        }
     }
 
     Ok(())

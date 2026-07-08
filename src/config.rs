@@ -28,6 +28,7 @@ type ResolvedConfig = (
     Option<String>,
     Option<String>,
     Option<String>,
+    bool,
 );
 
 #[derive(Subcommand)]
@@ -50,6 +51,7 @@ pub struct TnkConfig {
     pub default_engine_bind_host: Option<String>,
     pub default_sandbox_runtime: Option<String>,
     pub container_host_gateway: Option<String>,
+    pub services_auto_start: Option<bool>,
 }
 
 impl TnkConfig {
@@ -74,6 +76,7 @@ impl TnkConfig {
         let engine_bind_host = self.default_engine_bind_host.clone();
         let sandbox_runtime = self.default_sandbox_runtime.clone();
         let container_host_gateway = self.container_host_gateway.clone();
+        let services_auto_start = self.services_auto_start.unwrap_or(true);
         Ok((
             server_port,
             workspace_root,
@@ -84,6 +87,7 @@ impl TnkConfig {
             engine_bind_host,
             sandbox_runtime,
             container_host_gateway,
+            services_auto_start,
         ))
     }
 
@@ -98,6 +102,7 @@ impl TnkConfig {
             engine_bind_host,
             sandbox_runtime,
             container_host_gateway,
+            services_auto_start,
         ) = match self.clone().resolve() {
             Ok(v) => v,
             Err(err) => {
@@ -119,16 +124,17 @@ impl TnkConfig {
         );
         println!(
             "engine_bind_host  {}",
-            engine_bind_host.as_deref().unwrap_or("0.0.0.0")
+            engine_bind_host.as_deref().unwrap_or("127.0.0.1")
         );
         println!(
             "sandbox_runtime   {}",
             sandbox_runtime.as_deref().unwrap_or("lima")
         );
         println!(
-            "container_gateway {}",
+            "container_gateway   {}",
             container_host_gateway.unwrap_or_else(|| "<auto>".to_string())
         );
+        println!("services_auto_start  {}", services_auto_start);
     }
 }
 
@@ -170,6 +176,9 @@ pub fn load() -> Result<TnkConfig, color_eyre::Report> {
     if let Ok(v) = std::env::var("TNK_CONTAINER_HOST_GATEWAY") {
         config.container_host_gateway = Some(v);
     }
+    if let Ok(v) = std::env::var("TNK_SERVICES_AUTO_START") {
+        config.services_auto_start = Some(matches!(v.as_str(), "true" | "1"));
+    }
 
     Ok(config)
 }
@@ -200,19 +209,23 @@ model_dir = "~/opt/models"
 # Default sandbox profile
 default_provision_profile = "pi"
 
-# Inference runtime: "llama", "mlxcel", or "vllm-mlx"
+# Inference runtime: "llama"
 default_engine_runtime = "llama"
+
+# Auto-start tnk services when running `tnk run`
+services_auto_start = true
 
 # Sandbox backend: lima
 default_sandbox_runtime = "lima"
 
 # Bind host for inference server (127.0.0.1 for host-only, 0.0.0.0 for sandbox access)
-default_engine_bind_host = "0.0.0.0"
+default_engine_bind_host = "127.0.0.1"
 
 # Preset to load when --preset is omitted from engine start.
 # Must match the filename stem of a file in ~/.config/tnk/provider.d/
 # Example: "llama-default" loads ~/.config/tnk/provider.d/llama-default.ini
 # default_engine_preset = "llama-default"
+
 "##;
 
     fs::write(&config_path, template)?;
@@ -238,6 +251,7 @@ mod tests {
             bind_host,
             sandbox_runtime,
             gateway,
+            services_auto_start,
         ) = cfg.resolve().expect("resolve defaults");
 
         assert_eq!(port, 8080);
@@ -249,6 +263,7 @@ mod tests {
         assert!(bind_host.is_none());
         assert!(sandbox_runtime.is_none());
         assert!(gateway.is_none());
+        assert!(services_auto_start);
     }
 
     #[test]
@@ -263,6 +278,7 @@ mod tests {
             default_engine_bind_host: Some("127.0.0.1".to_string()),
             default_sandbox_runtime: Some("container".to_string()),
             container_host_gateway: Some("10.0.0.1".to_string()),
+            services_auto_start: Some(false),
         };
 
         let (
@@ -275,6 +291,7 @@ mod tests {
             bind_host,
             sandbox_runtime,
             gateway,
+            services_auto_start,
         ) = cfg.resolve().expect("resolve explicit values");
 
         assert_eq!(port, 9001);
@@ -286,5 +303,6 @@ mod tests {
         assert_eq!(bind_host.as_deref(), Some("127.0.0.1"));
         assert_eq!(sandbox_runtime.as_deref(), Some("container"));
         assert_eq!(gateway.as_deref(), Some("10.0.0.1"));
+        assert!(!services_auto_start);
     }
 }

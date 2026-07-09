@@ -23,7 +23,7 @@ cleanup() {
         (
             cd "$MOCK_PROJECT" >/dev/null 2>&1 || true
             cargo run --release --manifest-path "$REPO_ROOT/Cargo.toml" -- services stop >/dev/null 2>&1 || true
-            cargo run --release --manifest-path "$REPO_ROOT/Cargo.toml" -- sandbox delete --force --yes >/dev/null 2>&1 || true
+            cargo run --release --manifest-path "$REPO_ROOT/Cargo.toml" -- sandbox delete --yes >/dev/null 2>&1 || true
         )
     fi
 
@@ -38,7 +38,7 @@ export TNK_SERVER_PORT="19091"
 echo "[SMOKE] Project workspace context isolated at: ${MOCK_PROJECT}"
 
 echo "[SMOKE] Verifying CLI argument and state dispatch parsing layers..."
-cargo run --release -- sandbox delete --force --yes --dry-run
+cargo run --release -- sandbox delete --yes --dry-run
 cargo run --release -- services stop --dry-run
 cargo run --release -- sandbox stop --name "$MOCK_SANDBOX"
 
@@ -64,8 +64,8 @@ echo "[SMOKE] Running full lifecycle integration test (run -> sandbox -> shutdow
 
 pushd "$MOCK_PROJECT" >/dev/null
 
-echo "[SMOKE] 0. sandbox delete --force --yes (reset stale state)"
-cargo run --release --manifest-path "$REPO_ROOT/Cargo.toml" -- sandbox delete --force --yes || true
+echo "[SMOKE] 0. sandbox delete --yes (reset stale state)"
+cargo run --release --manifest-path "$REPO_ROOT/Cargo.toml" -- sandbox delete --yes || true
 
 echo "[SMOKE] 1. tnk run"
 cargo run --release --manifest-path "$REPO_ROOT/Cargo.toml" -- run --verbose
@@ -81,7 +81,7 @@ cargo run --release --manifest-path "$REPO_ROOT/Cargo.toml" -- services status -
 
 echo "[SMOKE] 5. shutdown"
 cargo run --release --manifest-path "$REPO_ROOT/Cargo.toml" -- services stop
-cargo run --release --manifest-path "$REPO_ROOT/Cargo.toml" -- sandbox delete --force --yes
+cargo run --release --manifest-path "$REPO_ROOT/Cargo.toml" -- sandbox delete --yes
 
 popd >/dev/null
 

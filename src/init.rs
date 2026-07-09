@@ -42,24 +42,19 @@ pub fn run(cmd: InitCommands) -> Result<(), color_eyre::Report> {
         .clone()
         .unwrap_or_else(|| "https://github.com/tappunk/tnk-specs.git".to_string());
 
-    let tmp_dir = std::env::temp_dir().join(format!(
-        "tnk-init-{}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos()
-    ));
+    let tmp_dir = tempfile::tempdir()
+        .map_err(|e| color_eyre::eyre::eyre!("failed to create temp dir: {}", e))?;
 
-    stage_specs_source(&repo_url, &tmp_dir)?;
+    stage_specs_source(&repo_url, tmp_dir.path())?;
 
     if let Some(parent) = config_dir.parent() {
         std::fs::create_dir_all(parent)?;
     }
 
     if cmd.force && config_dir.exists() {
-        sync_managed_dirs(&tmp_dir, &config_dir)?;
+        sync_managed_dirs(tmp_dir.path(), &config_dir)?;
     } else {
-        std::fs::rename(&tmp_dir, &config_dir)
+        std::fs::rename(tmp_dir.path(), &config_dir)
             .map_err(|e| color_eyre::eyre::eyre!("failed to install configs: {}", e))?;
     }
 
@@ -96,8 +91,7 @@ fn stage_specs_source(repo_url: &str, dst: &Path) -> Result<(), color_eyre::Repo
 
     if !status.success() {
         let _ = std::fs::remove_dir_all(dst);
-        eprintln!("error: failed to clone tnk-specs");
-        std::process::exit(1);
+        return Err(color_eyre::eyre::eyre!("failed to clone tnk-specs"));
     }
 
     Ok(())
@@ -135,8 +129,14 @@ fn sync_managed_dirs(src: &Path, dst: &Path) -> Result<(), color_eyre::Report> {
             if dst_path.exists() {
                 remove_dir_all(&dst_path)?;
             }
-            std::fs::rename(&src_path, &dst_path)
-                .map_err(|e| color_eyre::eyre::eyre!("failed to sync {}: {}", dir_name, e))?;
+            if let Err(_e) = std::fs::rename(&src_path, &dst_path) {
+                // Fallback: rename fails with EXDEV across filesystems
+                copy_dir_contents(&src_path, &dst_path)
+                    .map_err(|e| color_eyre::eyre::eyre!("failed to sync {}: {}", dir_name, e))?;
+                std::fs::remove_dir_all(&src_path).map_err(|e| {
+                    color_eyre::eyre::eyre!("failed to remove sync source {}: {}", dir_name, e)
+                })?;
+            }
         }
     }
     Ok(())

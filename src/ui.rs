@@ -38,6 +38,12 @@ pub fn is_verbose() -> bool {
 }
 
 pub fn log_info(message: &str) {
+    if GLOBAL_VERBOSITY.load(Ordering::Relaxed) >= VERBOSITY_NORMAL {
+        eprintln!("info: {}", message);
+    }
+}
+
+pub fn log_verbose(message: &str) {
     if GLOBAL_VERBOSITY.load(Ordering::Relaxed) == VERBOSITY_VERBOSE {
         eprintln!("info: {}", message);
     }
@@ -54,27 +60,32 @@ pub fn select_list(items: &[&str]) -> Option<usize> {
         return None;
     }
 
-    let stderr = io::stderr();
-    let mut handle = stderr.lock();
+    loop {
+        let stderr = io::stderr();
+        let mut handle = stderr.lock();
 
-    writeln!(handle).ok();
-    for (i, item) in items.iter().enumerate() {
-        writeln!(handle, "  {}) {}", i + 1, item).ok();
-    }
-    write!(handle, "Select preset (1-{}) or q to quit: ", items.len()).ok();
-    handle.flush().ok();
+        writeln!(handle).ok();
+        for (i, item) in items.iter().enumerate() {
+            writeln!(handle, "  {}) {}", i + 1, item).ok();
+        }
+        write!(handle, "Select preset (1-{}) or q to quit: ", items.len()).ok();
+        handle.flush().ok();
 
-    let mut input = String::new();
-    io::stdin().read_line(&mut input).ok();
+        let mut input = String::new();
+        io::stdin().read_line(&mut input).ok();
 
-    let trimmed = input.trim();
-    if trimmed == "q" || trimmed.is_empty() {
-        return None;
-    }
+        let trimmed = input.trim();
+        if trimmed == "q" || trimmed.is_empty() {
+            return None;
+        }
 
-    match trimmed.parse::<usize>() {
-        Ok(n) if n > 0 && n <= items.len() => Some(n - 1),
-        _ => select_list(items),
+        if let Some(n) = trimmed
+            .parse::<usize>()
+            .ok()
+            .filter(|n| *n > 0 && *n <= items.len())
+        {
+            return Some(n - 1);
+        }
     }
 }
 
@@ -96,4 +107,23 @@ pub fn is_human_output(output: crate::OutputFormat) -> bool {
         return true;
     }
     io::stderr().is_terminal()
+}
+
+#[derive(Copy, Clone)]
+pub enum ExitCode {
+    Usage = 64,
+    NotFound = 66,
+    PermissionDenied = 77,
+    Error = 1,
+}
+
+impl ExitCode {
+    pub fn as_i32(&self) -> i32 {
+        *self as i32
+    }
+}
+
+pub fn exit_with(code: ExitCode, msg: &str) -> ! {
+    eprintln!("error: {msg}");
+    std::process::exit(code.as_i32());
 }

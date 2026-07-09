@@ -24,6 +24,7 @@ use tokio::signal::unix::{SignalKind, signal};
 
 use crate::config;
 use crate::model;
+use crate::sandbox::container_utils;
 
 use shell_words;
 
@@ -99,7 +100,7 @@ pub fn supported_runtime_names() -> &'static [&'static str] {
     &["llama", "mlxcel", "vllm-mlx"]
 }
 
-pub fn resolve_runtime_for_profile(
+pub async fn resolve_runtime_for_profile(
     runtime_flag: Option<String>,
     configured_runtime: Option<String>,
     profile: Option<&str>,
@@ -116,7 +117,7 @@ pub fn resolve_runtime_for_profile(
     }
 
     if let Some(profile_name) = profile
-        && let Ok(Some(preset)) = resolve_preset(profile_name)
+        && let Ok(Some(preset)) = resolve_preset(profile_name).await
         && let Some(runtime) = preset.runtime
     {
         if supports_runtime(&runtime) {
@@ -143,14 +144,12 @@ pub fn resolve_runtime_for_profile(
     Ok(runtime)
 }
 
-pub fn active_preset_file_for_runtime(runtime: &str) -> &'static str {
-    runtime_spec(runtime)
-        .unwrap_or(LLAMA_SPEC)
-        .active_preset_file
+pub fn active_preset_file_for_runtime(runtime: &str) -> Option<&'static str> {
+    runtime_spec(runtime).map(|s| s.active_preset_file)
 }
 
-pub fn default_model_for_runtime(runtime: &str) -> &'static str {
-    runtime_spec(runtime).unwrap_or(LLAMA_SPEC).default_model_id
+pub fn default_model_for_runtime(runtime: &str) -> Option<&'static str> {
+    runtime_spec(runtime).map(|s| s.default_model_id)
 }
 
 fn resolve_bind_host(
@@ -164,7 +163,7 @@ fn resolve_bind_host(
         return Ok(host);
     }
 
-    if let Ok(cfg) = config::load()
+    if let Ok(cfg) = config::load_blocking()
         && let Some(host) = cfg
             .default_engine_bind_host
             .map(|v| v.trim().to_string())
@@ -215,10 +214,17 @@ fn preset_from_kv(name: &str, kv: &HashMap<String, String>) -> Option<PresetSpec
         .get("runtime")
         .or_else(|| kv.get("engine_runtime"))
         .cloned();
-    let extra = kv
-        .get("extra")
-        .map(|s| shell_words::split(s).unwrap_or_default())
-        .unwrap_or_default();
+    let extra: Vec<String> = match kv.get("extra").map(|s| shell_words::split(s)) {
+        Some(Ok(args)) => args,
+        Some(Err(e)) => {
+            crate::ui::log_warn(&format!(
+                "invalid extra in preset '{}': {e}; skipping preset",
+                name
+            ));
+            return None;
+        }
+        None => Vec::new(),
+    };
 
     Some(PresetSpec {
         name: name.to_string(),
@@ -228,61 +234,77 @@ fn preset_from_kv(name: &str, kv: &HashMap<String, String>) -> Option<PresetSpec
     })
 }
 
-fn discover_presets() -> Result<Vec<PresetSpec>, color_eyre::Report> {
-    let home = std::env::var("HOME")?;
-    let root = PathBuf::from(home).join(".config/tnk/provider.d");
-    if !root.is_dir() {
-        return Ok(Vec::new());
-    }
+async fn discover_presets() -> Result<Vec<PresetSpec>, color_eyre::Report> {
+    tokio::task::spawn_blocking(move || -> Result<Vec<PresetSpec>, color_eyre::Report> {
+        let home = std::env::var("HOME")?;
+        let root = PathBuf::from(home).join(".config/tnk/provider.d");
+        if !root.is_dir() {
+            return Ok(Vec::new());
+        }
 
-    let mut presets = Vec::new();
-    let mut stack = vec![root];
+        let mut presets = Vec::new();
+        let mut stack = vec![root];
+        let mut visited = std::collections::HashSet::new();
 
-    while let Some(dir) = stack.pop() {
-        for entry in stdfs::read_dir(&dir)? {
-            let entry = entry?;
-            let path = entry.path();
-            if entry.file_type()?.is_dir() {
-                stack.push(path);
+        while let Some(dir) = stack.pop() {
+            let canonical = dir.canonicalize().ok();
+            if let Some(c) = &canonical
+                && !visited.insert(c.clone())
+            {
                 continue;
             }
 
-            if path.extension().and_then(|s| s.to_str()) != Some("ini") {
-                continue;
-            }
+            for entry in stdfs::read_dir(&dir)? {
+                let entry = entry?;
+                let path = entry.path();
+                let meta = match path.metadata() {
+                    Ok(meta) => meta,
+                    Err(_) => continue,
+                };
 
-            let name = path
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or_default()
-                .to_string();
-            if name.is_empty() {
-                continue;
-            }
+                if meta.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
 
-            let kv = parse_ini_file(&path)?;
-            if let Some(preset) = preset_from_kv(&name, &kv) {
-                presets.push(preset);
+                if !meta.is_file() {
+                    continue;
+                }
+
+                if path.extension().and_then(|s| s.to_str()) != Some("ini") {
+                    continue;
+                }
+
+                let name = path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or_default()
+                    .to_string();
+                if name.is_empty() {
+                    continue;
+                }
+
+                let kv = parse_ini_file(&path)?;
+                if let Some(preset) = preset_from_kv(&name, &kv) {
+                    presets.push(preset);
+                }
             }
         }
-    }
 
-    presets.sort_by(|a, b| a.name.cmp(&b.name));
-    Ok(presets)
+        presets.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(presets)
+    })
+    .await?
 }
 
-fn resolve_preset(profile: &str) -> Result<Option<PresetSpec>, color_eyre::Report> {
+async fn resolve_preset(profile: &str) -> Result<Option<PresetSpec>, color_eyre::Report> {
     let trimmed = profile.trim();
     if trimmed.is_empty() {
         return Ok(None);
     }
 
-    let presets = discover_presets()?;
+    let presets = discover_presets().await?;
     Ok(presets.into_iter().find(|p| p.name == trimmed))
-}
-
-fn is_process_alive(pid: u32) -> bool {
-    unsafe { libc::kill(pid as i32, 0) == 0 }
 }
 
 fn pid_file_path(spec: EngineRuntimeSpec) -> Option<PathBuf> {
@@ -291,53 +313,84 @@ fn pid_file_path(spec: EngineRuntimeSpec) -> Option<PathBuf> {
         .map(|h| PathBuf::from(h).join(format!(".cache/tnk/{}", spec.pid_file_name)))
 }
 
-fn kill_runtime_target(pid: u32, sig: i32) {
+async fn is_known_runtime_process(pid: u32) -> bool {
+    tokio::task::spawn_blocking(move || {
+        let known = ["llama-server", "mlxcel-server", "vllm-mlx"];
+        let output = std::process::Command::new("ps")
+            .args(["-p", &pid.to_string(), "-o", "comm="])
+            .output();
+        match output {
+            Ok(out) if out.status.success() => {
+                let comm = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                known.iter().any(|k| {
+                    comm == *k || (comm.contains('/') && comm.rsplit('/').next() == Some(*k))
+                })
+            }
+            _ => false,
+        }
+    })
+    .await
+    .unwrap_or_else(|e| {
+        crate::ui::log_warn(&format!("is_known_runtime_process task panicked: {e}"));
+        false
+    })
+}
+
+async fn kill_runtime_target(pid: u32, sig: i32) {
+    if !crate::lifecycle::is_process_alive(pid) {
+        return;
+    }
+
     let pgid = unsafe { libc::getpgid(pid as i32) };
-    if pgid > 0 {
-        unsafe {
-            libc::kill(-pgid, sig);
+    let use_pgid = pgid > 0 && is_known_runtime_process(pid).await;
+
+    // Re-verify the PID is still alive after the async runtime check.
+    // Prevents targeting a recycled PGID if the original process group
+    // leader exited between our getpgid read and the kill signal.
+    let result = if use_pgid && crate::lifecycle::is_process_alive(pid) {
+        let pgid_check = unsafe { libc::getpgid(pid as i32) };
+        if pgid_check == pgid && pgid_check > 0 && is_known_runtime_process(pid).await {
+            unsafe { libc::kill(-pgid_check, sig) }
+        } else {
+            unsafe { libc::kill(pid as i32, sig) }
         }
     } else {
-        unsafe {
-            libc::kill(pid as i32, sig);
-        }
+        unsafe { libc::kill(pid as i32, sig) }
+    };
+    if result != 0 {
+        let err = std::io::Error::last_os_error();
+        crate::ui::log_warn(&format!(
+            "kill({}, {}) failed (errno={}: {})",
+            pid,
+            sig,
+            err.raw_os_error().unwrap_or(-1),
+            err
+        ));
     }
 }
 
-fn last_errno() -> i32 {
-    #[cfg(any(target_os = "macos", target_os = "ios"))]
-    {
-        // SAFETY: libc exposes thread-local errno pointer for current thread.
-        unsafe { *libc::__error() }
-    }
-
-    #[cfg(not(any(target_os = "macos", target_os = "ios")))]
-    {
-        // SAFETY: libc exposes thread-local errno pointer for current thread.
-        unsafe { *libc::__errno_location() }
-    }
+/// Call waitpid with WNOHANG. Returns Some(exit status) if the process has exited,
+/// None if it is still running or the PID is unknown.
+fn waitpid_nowait(pid: u32) -> Option<i32> {
+    let mut status = 0i32;
+    let ret = unsafe { libc::waitpid(pid as i32, &mut status, libc::WNOHANG) };
+    if ret > 0 { Some(status) } else { None }
 }
 
-fn matches_runtime_process(spec: EngineRuntimeSpec, comm: &str, args: &str) -> bool {
+fn matches_runtime_process(spec: EngineRuntimeSpec, args: &str) -> bool {
     let executable = spec.executable;
-
-    let comm_basename = comm.rsplit('/').next().unwrap_or(comm);
-    if comm_basename == executable {
-        return true;
-    }
-
     let argv0 = args.split_whitespace().next().unwrap_or("");
     let argv0_basename = argv0.rsplit('/').next().unwrap_or(argv0);
     argv0_basename == executable
 }
 
 async fn is_runtime_pid(spec: EngineRuntimeSpec, pid: u32) -> bool {
-    if !is_process_alive(pid) {
+    if !crate::lifecycle::is_process_alive(pid) {
         return false;
     }
 
     let output = AsyncCommand::new("ps")
-        .args(["-p", &pid.to_string(), "-o", "comm=", "-o", "args="])
+        .args(["-p", &pid.to_string(), "-o", "args="])
         .output()
         .await;
 
@@ -345,13 +398,7 @@ async fn is_runtime_pid(spec: EngineRuntimeSpec, pid: u32) -> bool {
         let ps_output = String::from_utf8_lossy(&out.stdout);
         for line in ps_output.lines() {
             let trimmed = line.trim();
-            let parts: Vec<&str> = trimmed.splitn(2, ' ').collect();
-            if parts.len() < 2 {
-                continue;
-            }
-            let comm = parts[0].trim();
-            let args = parts[1];
-            if matches_runtime_process(spec, comm, args) {
+            if matches_runtime_process(spec, trimmed) {
                 return true;
             }
         }
@@ -363,7 +410,7 @@ async fn is_runtime_pid(spec: EngineRuntimeSpec, pid: u32) -> bool {
 async fn list_runtime_pids(spec: EngineRuntimeSpec) -> Vec<u32> {
     let own_pid = std::process::id();
     let output = AsyncCommand::new("ps")
-        .args(["-axo", "pid=,comm=,args="])
+        .args(["-axo", "pid=,args="])
         .output()
         .await;
     let mut pids = Vec::new();
@@ -376,20 +423,19 @@ async fn list_runtime_pids(spec: EngineRuntimeSpec) -> Vec<u32> {
                 continue;
             }
 
-            let mut parts = trimmed.split_whitespace();
+            let mut parts = trimmed.splitn(2, ' ');
             let pid_str = match parts.next() {
                 Some(v) => v,
                 None => continue,
             };
-            let comm = match parts.next() {
+            let args = match parts.next() {
                 Some(v) => v,
                 None => continue,
             };
-            let args = parts.collect::<Vec<_>>().join(" ");
 
             if let Ok(pid) = pid_str.parse::<u32>()
                 && pid != own_pid
-                && matches_runtime_process(spec, comm, &args)
+                && matches_runtime_process(spec, args)
             {
                 pids.push(pid);
             }
@@ -463,90 +509,25 @@ async fn detect_running_model_for_runtime(spec: EngineRuntimeSpec) -> Option<Str
 }
 
 fn selected_sandbox_runtime() -> crate::sandbox::Runtime {
-    config::load()
+    config::load_blocking()
         .ok()
         .and_then(|cfg| crate::sandbox::resolve_runtime(None, cfg.default_sandbox_runtime).ok())
         .unwrap_or_default()
 }
 
 async fn list_container_sandboxes() -> Vec<(String, String)> {
-    #[derive(serde::Deserialize)]
-    struct ContainerConfiguration {
-        #[serde(default)]
-        id: Option<String>,
-        #[serde(default, alias = "ID", alias = "Id")]
-        id_alias: Option<String>,
-    }
-
-    #[derive(serde::Deserialize)]
-    struct ContainerItem {
-        #[serde(default)]
-        id: Option<String>,
-        #[serde(default, alias = "ID", alias = "Id")]
-        id_alias: Option<String>,
-        #[serde(default)]
-        status: Option<serde_json::Value>,
-        #[serde(default, alias = "Status")]
-        status_alias: Option<serde_json::Value>,
-        #[serde(default)]
-        state: Option<String>,
-        #[serde(default, alias = "State")]
-        state_alias: Option<String>,
-        #[serde(default)]
-        configuration: Option<ContainerConfiguration>,
-        #[serde(default, alias = "Configuration", alias = "config", alias = "Config")]
-        configuration_alias: Option<ContainerConfiguration>,
-    }
-
-    let output = AsyncCommand::new("container")
-        .args(["list", "--all", "--format", "json"])
-        .output()
-        .await;
-    let Ok(out) = output else {
-        return Vec::new();
-    };
-    if !out.status.success() {
-        return Vec::new();
-    }
-
-    let Ok(items) = serde_json::from_slice::<Vec<ContainerItem>>(&out.stdout) else {
+    let Some(items) = container_utils::container_list_all().await else {
         return Vec::new();
     };
 
     let mut rows = Vec::new();
     for item in items {
-        let id = item
-            .id
-            .as_deref()
-            .or(item.id_alias.as_deref())
-            .or_else(|| {
-                item.configuration
-                    .as_ref()
-                    .or(item.configuration_alias.as_ref())
-                    .and_then(|c| c.id.as_deref().or(c.id_alias.as_deref()))
-            })
-            .unwrap_or_default()
-            .to_string();
+        let id = item.id().unwrap_or_default().to_string();
         if !id.starts_with("tnk-") || id == "tnk-services" || id == "tnk-searxng" {
             continue;
         }
 
-        let status = item
-            .status
-            .as_ref()
-            .or(item.status_alias.as_ref())
-            .and_then(|v| {
-                if let Some(s) = v.as_str() {
-                    return Some(s);
-                }
-                v.get("state")
-                    .or_else(|| v.get("State"))
-                    .and_then(|s| s.as_str())
-            })
-            .or(item.state.as_deref())
-            .or(item.state_alias.as_deref())
-            .unwrap_or("unknown")
-            .to_string();
+        let status = item.status_state().unwrap_or("unknown").to_string();
 
         let token = id.strip_prefix("tnk-").unwrap_or(&id).to_string();
         rows.push((token, status));
@@ -602,7 +583,7 @@ fn expand_model_path(model: &str) -> String {
         return format!("{}/{}", home, rest);
     }
 
-    let model_dir = config::load()
+    let model_dir = config::load_blocking()
         .ok()
         .and_then(|cfg| cfg.model_dir)
         .map(|d| {
@@ -617,7 +598,7 @@ fn expand_model_path(model: &str) -> String {
     format!("{}/{}", model_dir, model)
 }
 
-fn resolve_model_id_for_runtime(
+async fn resolve_model_id_for_runtime(
     spec: EngineRuntimeSpec,
     preset: Option<String>,
 ) -> (String, Vec<String>) {
@@ -626,17 +607,17 @@ fn resolve_model_id_for_runtime(
         .filter(|p| !p.is_empty());
 
     if let Some(ref name) = trimmed
-        && let Ok(Some(p)) = resolve_preset(name)
+        && let Ok(Some(p)) = resolve_preset(name).await
     {
         return (expand_model_path(&p.model), p.extra);
     }
 
-    if let Ok(cfg) = config::load()
+    if let Ok(cfg) = config::load().await
         && let Some(name) = cfg
             .default_engine_preset
             .map(|p| p.trim().to_string())
             .filter(|p| !p.is_empty())
-        && let Ok(Some(p)) = resolve_preset(&name)
+        && let Ok(Some(p)) = resolve_preset(&name).await
     {
         return (expand_model_path(&p.model), p.extra);
     }
@@ -687,8 +668,9 @@ fn build_command(
 }
 
 pub async fn running_runtime() -> Option<EngineRuntimeSpec> {
+    let ps_cache = PsSnapshot::new().await.ok();
     for spec in SUPPORTED_RUNTIMES {
-        if is_running_for_runtime(spec).await {
+        if is_running_for_runtime(spec, ps_cache.as_ref()).await {
             return Some(spec);
         }
     }
@@ -696,8 +678,9 @@ pub async fn running_runtime() -> Option<EngineRuntimeSpec> {
 }
 
 pub async fn is_running() -> bool {
+    let ps_cache = PsSnapshot::new().await.ok();
     for spec in SUPPORTED_RUNTIMES {
-        if is_running_for_runtime(spec).await {
+        if is_running_for_runtime(spec, ps_cache.as_ref()).await {
             return true;
         }
     }
@@ -705,23 +688,69 @@ pub async fn is_running() -> bool {
     false
 }
 
-async fn is_running_for_runtime(spec: EngineRuntimeSpec) -> bool {
-    let pid_file = match pid_file_path(spec) {
-        Some(path) => path,
-        None => return !list_runtime_pids(spec).await.is_empty(),
+/// A parsed snapshot of `ps` output, cached for a single status call.
+pub struct PsSnapshot {
+    pids: Vec<(u32, String)>,
+}
+
+impl PsSnapshot {
+    pub async fn new() -> Result<Self, color_eyre::Report> {
+        let output = AsyncCommand::new("ps")
+            .args(["-axo", "pid=,args="])
+            .output()
+            .await?;
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let own_pid = std::process::id();
+        let mut pids = Vec::new();
+        for line in stdout.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let mut parts = trimmed.splitn(2, ' ');
+            if let Some(pid_str) = parts.next()
+                && let Some(args) = parts.next()
+                && let Ok(pid) = pid_str.parse::<u32>()
+                && pid != own_pid
+            {
+                pids.push((pid, args.to_string()));
+            }
+        }
+        Ok(Self { pids })
+    }
+
+    pub fn has_runtime(&self, spec: EngineRuntimeSpec) -> bool {
+        self.pids
+            .iter()
+            .any(|(_, args)| matches_runtime_process(spec, args))
+    }
+}
+
+async fn is_running_for_runtime(spec: EngineRuntimeSpec, ps_cache: Option<&PsSnapshot>) -> bool {
+    let has_runtime = if let Some(cache) = ps_cache {
+        cache.has_runtime(spec)
+    } else {
+        match PsSnapshot::new().await {
+            Ok(snapshot) => snapshot.has_runtime(spec),
+            Err(_) => false,
+        }
+    };
+
+    let Some(pid_file) = pid_file_path(spec) else {
+        return has_runtime;
     };
 
     if pid_file.exists() {
         let pid_bytes = match fs::read_to_string(&pid_file).await {
             Ok(b) => b,
-            Err(_) => return !list_runtime_pids(spec).await.is_empty(),
+            Err(_) => return has_runtime,
         };
 
         let pid = match pid_bytes.trim().parse::<u32>() {
             Ok(p) => p,
             Err(_) => {
                 fs::remove_file(&pid_file).await.ok();
-                return !list_runtime_pids(spec).await.is_empty();
+                return has_runtime;
             }
         };
 
@@ -732,7 +761,7 @@ async fn is_running_for_runtime(spec: EngineRuntimeSpec) -> bool {
         fs::remove_file(&pid_file).await.ok();
     }
 
-    !list_runtime_pids(spec).await.is_empty()
+    has_runtime
 }
 
 pub async fn start(
@@ -751,7 +780,7 @@ pub async fn start(
     })?;
 
     let _engine_lock = crate::lifecycle::acquire("engine", Duration::from_secs(20)).await?;
-    let (model_id, extra) = resolve_model_id_for_runtime(spec, preset);
+    let (model_id, extra) = resolve_model_id_for_runtime(spec, preset).await;
     let bind_host = resolve_bind_host(spec, bind_host)?;
 
     let home = std::env::var("HOME")?;
@@ -795,6 +824,7 @@ pub async fn start(
 
         let mut sigterm = signal(SignalKind::terminate())?;
         let mut sigint = signal(SignalKind::interrupt())?;
+        let mut sighup = signal(SignalKind::hangup())?;
         let mut shutdown_requested = false;
 
         loop {
@@ -813,11 +843,11 @@ pub async fn start(
                                 "forwarding SIGTERM to {} pid {}",
                                 spec.name, child_pid
                             ));
-                            kill_runtime_target(child_pid, libc::SIGTERM);
+                            kill_runtime_target(child_pid, libc::SIGTERM).await;
                             shutdown_requested = true;
                         } else {
                             eprintln!("warning: second signal received, forwarding SIGKILL to {} pid {}", spec.name, child_pid);
-                            kill_runtime_target(child_pid, libc::SIGKILL);
+                            kill_runtime_target(child_pid, libc::SIGKILL).await;
                         }
                     }
                 }
@@ -828,11 +858,26 @@ pub async fn start(
                                 "forwarding SIGINT to {} pid {}",
                                 spec.name, child_pid
                             ));
-                            kill_runtime_target(child_pid, libc::SIGTERM);
+                            kill_runtime_target(child_pid, libc::SIGTERM).await;
                             shutdown_requested = true;
                         } else {
                             eprintln!("warning: second signal received, forwarding SIGKILL to {} pid {}", spec.name, child_pid);
-                            kill_runtime_target(child_pid, libc::SIGKILL);
+                            kill_runtime_target(child_pid, libc::SIGKILL).await;
+                        }
+                    }
+                }
+                _ = sighup.recv() => {
+                    if child_pid != 0 {
+                        if !shutdown_requested {
+                            crate::ui::log_info(&format!(
+                                "forwarding SIGHUP to {} pid {}",
+                                spec.name, child_pid
+                            ));
+                            kill_runtime_target(child_pid, libc::SIGTERM).await;
+                            shutdown_requested = true;
+                        } else {
+                            eprintln!("warning: second signal received, forwarding SIGKILL to {} pid {}", spec.name, child_pid);
+                            kill_runtime_target(child_pid, libc::SIGKILL).await;
                         }
                     }
                 }
@@ -860,7 +905,7 @@ pub async fn start(
     unsafe {
         cmd.pre_exec(|| {
             if libc::setsid() == -1 {
-                return Err(std::io::Error::from_raw_os_error(last_errno()));
+                return Err(std::io::Error::last_os_error());
             }
             Ok(())
         });
@@ -869,6 +914,34 @@ pub async fn start(
     match cmd.spawn() {
         Ok(c) => {
             let pid = c.id();
+            drop(c);
+
+            let mut early_exit = None;
+            for _ in 0..50 {
+                if let Some(status_code) = waitpid_nowait(pid) {
+                    early_exit = Some(status_code);
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+
+            if let Some(status_code) = early_exit {
+                return Err(color_eyre::eyre::eyre!(
+                    "{} exited immediately after spawn (pid {}, exit code {})",
+                    spec.name,
+                    pid,
+                    status_code
+                ));
+            }
+
+            if !crate::lifecycle::is_process_alive(pid) {
+                return Err(color_eyre::eyre::eyre!(
+                    "{} exited immediately after spawn (pid {})",
+                    spec.name,
+                    pid
+                ));
+            }
+
             fs::write(&pid_file, pid.to_string()).await?;
             let active_model_path = cache_dir.join(spec.active_preset_file);
             fs::write(&active_model_path, &model_id).await?;
@@ -945,7 +1018,7 @@ async fn stop_pid(spec: EngineRuntimeSpec, pid: u32) {
     }
 
     crate::ui::log_info(&format!("stopping {} pid {}", spec.name, pid));
-    kill_runtime_target(pid, libc::SIGTERM);
+    kill_runtime_target(pid, libc::SIGTERM).await;
 
     let mut died = false;
     for _ in 0..20 {
@@ -958,13 +1031,15 @@ async fn stop_pid(spec: EngineRuntimeSpec, pid: u32) {
 
     if died {
         crate::ui::log_info(&format!("stopped {} pid {}", spec.name, pid));
-    } else {
+    } else if is_runtime_pid(spec, pid).await {
         eprintln!(
             "warning: sigterm failed for {} pid {}, escalating to sigkill",
             spec.name, pid
         );
-        kill_runtime_target(pid, libc::SIGKILL);
+        kill_runtime_target(pid, libc::SIGKILL).await;
         crate::ui::log_info(&format!("killed {} pid {}", spec.name, pid));
+    } else {
+        crate::ui::log_info(&format!("stopped {} pid {}", spec.name, pid));
     }
 }
 
@@ -972,10 +1047,12 @@ pub async fn status(output: crate::OutputFormat) -> Result<(), color_eyre::Repor
     let home = std::env::var("HOME")?;
     let cache_dir = PathBuf::from(&home).join(".cache/tnk");
     let server_port = config::load()
+        .await
         .ok()
         .and_then(|cfg| cfg.server_port)
         .unwrap_or(8080);
 
+    let ps_cache = PsSnapshot::new().await.ok();
     let mut runtimes = Vec::new();
     for spec in SUPPORTED_RUNTIMES {
         let active_model_from_cache = fs::read_to_string(cache_dir.join(spec.active_preset_file))
@@ -983,7 +1060,7 @@ pub async fn status(output: crate::OutputFormat) -> Result<(), color_eyre::Repor
             .ok()
             .map(|s| s.trim().to_string())
             .unwrap_or_default();
-        let running = is_running_for_runtime(spec).await;
+        let running = is_running_for_runtime(spec, ps_cache.as_ref()).await;
         let active_model = if active_model_from_cache.is_empty() && running {
             let from_process = detect_running_model_for_runtime(spec)
                 .await
@@ -993,6 +1070,8 @@ pub async fn status(output: crate::OutputFormat) -> Result<(), color_eyre::Repor
             } else {
                 model::poll_loaded_model("127.0.0.1", server_port, 1, 0.0)
                     .await
+                    .ok()
+                    .flatten()
                     .unwrap_or_default()
             }
         } else {
@@ -1049,51 +1128,27 @@ pub async fn status(output: crate::OutputFormat) -> Result<(), color_eyre::Repor
         crate::sandbox::Runtime::Container => {
             let services_container = "tnk-services";
             let searxng_container = "tnk-searxng";
-            let container_items = AsyncCommand::new("container")
-                .args(["list", "--all", "--format", "json"])
-                .output()
+            let container_items = container_utils::container_list_all()
                 .await
-                .ok()
-                .filter(|out| out.status.success())
-                .and_then(|out| serde_json::from_slice::<Vec<serde_json::Value>>(&out.stdout).ok())
                 .unwrap_or_default();
 
-            let mut services_status: Option<&str> = None;
-            for item in &container_items {
-                let id = item
-                    .get("id")
-                    .and_then(|v| v.as_str())
-                    .or_else(|| {
-                        item.get("configuration")
-                            .and_then(|v| v.get("id"))
-                            .and_then(|v| v.as_str())
-                    })
-                    .unwrap_or_default();
-                if id != services_container {
-                    continue;
-                }
-                let state = item
-                    .get("status")
-                    .and_then(|v| v.get("state"))
-                    .and_then(|v| v.as_str())
-                    .or_else(|| item.get("state").and_then(|v| v.as_str()))
-                    .unwrap_or("unknown");
-                services_status = Some(if state.eq_ignore_ascii_case("running") {
+            let services_item = container_items
+                .iter()
+                .find(|item| item.id() == Some(services_container));
+            if let Some(item) = services_item {
+                let state = item.status_state().unwrap_or("unknown");
+                let status = if state.eq_ignore_ascii_case("running") {
                     "running"
                 } else {
                     "stopped"
-                });
-                break;
-            }
-
-            if let Some(status) = services_status {
+                };
                 let provision_output = AsyncCommand::new("container")
                     .args([
                         "exec",
                         services_container,
                         "bash",
                         "-c",
-                        "test -f $HOME/mcp-stdio.sh && test -f $HOME/.local/lib/node_modules/mcp-searxng/dist/cli.js",
+                        crate::sandbox::shared::PROVISION_STATE_CHECK,
                     ])
                     .output()
                     .await
@@ -1107,35 +1162,16 @@ pub async fn status(output: crate::OutputFormat) -> Result<(), color_eyre::Repor
                 print_status_row("mcp (container)", mcp_state, "");
             }
 
-            let mut searxng_status: Option<&str> = None;
-            for item in &container_items {
-                let id = item
-                    .get("id")
-                    .and_then(|v| v.as_str())
-                    .or_else(|| {
-                        item.get("configuration")
-                            .and_then(|v| v.get("id"))
-                            .and_then(|v| v.as_str())
-                    })
-                    .unwrap_or_default();
-                if id != searxng_container {
-                    continue;
-                }
-                let state = item
-                    .get("status")
-                    .and_then(|v| v.get("state"))
-                    .and_then(|v| v.as_str())
-                    .or_else(|| item.get("state").and_then(|v| v.as_str()))
-                    .unwrap_or("unknown");
-                searxng_status = Some(if state.eq_ignore_ascii_case("running") {
+            let searxng_item = container_items
+                .iter()
+                .find(|item| item.id() == Some(searxng_container));
+            if let Some(item) = searxng_item {
+                let state = item.status_state().unwrap_or("unknown");
+                let status = if state.eq_ignore_ascii_case("running") {
                     "running"
                 } else {
                     "stopped"
-                });
-                break;
-            }
-
-            if let Some(status) = searxng_status {
+                };
                 print_status_row("searxng (container)", status, "");
             }
 
@@ -1208,6 +1244,7 @@ fn print_runtime_status(runtime: &str, model_id: &str, is_running: bool, configu
 
 pub async fn print_status() -> Result<(), color_eyre::Report> {
     let server_port = config::load()
+        .await
         .ok()
         .and_then(|cfg| cfg.server_port)
         .unwrap_or(8080);
@@ -1219,6 +1256,8 @@ pub async fn print_status() -> Result<(), color_eyre::Report> {
         let detail = if model.is_empty() {
             model::poll_loaded_model("127.0.0.1", server_port, 1, 0.0)
                 .await
+                .ok()
+                .flatten()
                 .unwrap_or_default()
         } else {
             model
@@ -1260,8 +1299,11 @@ pub async fn print_status() -> Result<(), color_eyre::Report> {
                 let mcp_state = if state.eq_ignore_ascii_case("running") {
                     let provision_output = AsyncCommand::new("container")
                         .args([
-                            "exec", "tnk-services", "bash", "-c",
-                            "test -f $HOME/mcp-stdio.sh && test -f $HOME/.local/lib/node_modules/mcp-searxng/dist/cli.js",
+                            "exec",
+                            "tnk-services",
+                            "bash",
+                            "-c",
+                            crate::sandbox::shared::PROVISION_STATE_CHECK,
                         ])
                         .output()
                         .await
@@ -1344,9 +1386,10 @@ pub async fn print_status() -> Result<(), color_eyre::Report> {
     Ok(())
 }
 
-pub fn presets_for_runtime(
+pub async fn presets_for_runtime(
     runtime: &str,
     output: crate::OutputFormat,
+    strict: bool,
 ) -> Result<(), color_eyre::Report> {
     let spec = runtime_spec(runtime).ok_or_else(|| {
         color_eyre::eyre::eyre!(
@@ -1356,9 +1399,14 @@ pub fn presets_for_runtime(
         )
     })?;
 
-    let presets: Vec<PresetSpec> = discover_presets()?
+    let presets: Vec<PresetSpec> = discover_presets()
+        .await?
         .into_iter()
-        .filter(|p| p.runtime.as_deref().unwrap_or(spec.name) == spec.name)
+        .filter(|p| match (p.runtime.as_deref(), strict) {
+            (Some(r), _) => r == spec.name,
+            (None, false) => true,
+            (None, true) => false,
+        })
         .collect();
 
     if output == crate::OutputFormat::Json {

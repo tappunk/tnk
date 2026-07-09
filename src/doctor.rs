@@ -12,42 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::sandbox::container_utils::{self, ContainerListItem};
 use std::path::PathBuf;
 use std::process::Stdio;
 
+use tokio::fs;
 use tokio::process::Command;
 
-fn container_id_from_item(item: &serde_json::Value) -> Option<String> {
-    item.get("id")
-        .and_then(|v| v.as_str())
-        .or_else(|| {
-            item.get("configuration")
-                .and_then(|v| v.get("id"))
-                .and_then(|v| v.as_str())
-        })
-        .map(|v| v.to_string())
-}
-
-fn container_has_label(item: &serde_json::Value, key: &str, expected: &str) -> bool {
-    item.get("configuration")
-        .and_then(|v| v.get("labels"))
-        .and_then(|v| v.get(key))
-        .and_then(|v| v.as_str())
-        .is_some_and(|v| v == expected)
-}
-
-async fn list_containers() -> Result<Vec<serde_json::Value>, color_eyre::Report> {
-    let output = Command::new("container")
-        .args(["list", "--all", "--format", "json"])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .output()
-        .await?;
-    if !output.status.success() {
+async fn list_containers() -> Result<Vec<ContainerListItem>, color_eyre::Report> {
+    let Some(items) = container_utils::container_list_all().await else {
         return Ok(vec![]);
-    }
-    let items =
-        serde_json::from_slice::<Vec<serde_json::Value>>(&output.stdout).unwrap_or_else(|_| vec![]);
+    };
     Ok(items)
 }
 
@@ -71,7 +46,7 @@ async fn list_lima_instances() -> Result<Vec<String>, color_eyre::Report> {
 }
 
 fn selected_runtime() -> crate::sandbox::Runtime {
-    crate::config::load()
+    crate::config::load_blocking()
         .ok()
         .and_then(|cfg| crate::sandbox::resolve_runtime(None, cfg.default_sandbox_runtime).ok())
         .unwrap_or_default()
@@ -105,7 +80,7 @@ fn check_container_cli() -> Result<(), color_eyre::Report> {
 }
 
 fn check_default_engine_runtime_binary() -> Result<(), color_eyre::Report> {
-    let runtime = crate::config::load()?
+    let runtime = crate::config::load_blocking()?
         .default_engine_runtime
         .unwrap_or_else(|| "llama".to_string());
 
@@ -141,9 +116,9 @@ async fn check_native_arm64_buildkit() -> Result<(), color_eyre::Report> {
     let containerfile_path = probe_root.join("Containerfile");
     let probe_tag = "tnk-doctor-buildkit-probe:latest";
 
-    let _ = std::fs::remove_dir_all(&probe_root);
-    std::fs::create_dir_all(&probe_root)?;
-    std::fs::write(&containerfile_path, "FROM scratch\n")?;
+    let _ = fs::remove_dir_all(&probe_root).await;
+    fs::create_dir_all(&probe_root).await?;
+    fs::write(&containerfile_path, "FROM scratch\n").await?;
 
     let output = Command::new("container")
         .args([
@@ -172,7 +147,7 @@ async fn check_native_arm64_buildkit() -> Result<(), color_eyre::Report> {
         .stderr(Stdio::null())
         .status()
         .await;
-    let _ = std::fs::remove_dir_all(&probe_root);
+    let _ = fs::remove_dir_all(&probe_root).await;
 
     if output.status.success() {
         eprintln!("ok: container buildkit supports native linux/arm64 builds");
@@ -196,7 +171,7 @@ async fn check_native_arm64_buildkit() -> Result<(), color_eyre::Report> {
 }
 
 fn check_config() -> Result<(), color_eyre::Report> {
-    let cfg = crate::config::load()?;
+    let cfg = crate::config::load_blocking()?;
     cfg.print_resolved();
     eprintln!("ok: config loaded");
     Ok(())
@@ -219,7 +194,7 @@ async fn check_services() -> Result<(), color_eyre::Report> {
             let mut searxng_exists = false;
 
             for item in items {
-                if let Some(id) = container_id_from_item(&item) {
+                if let Some(id) = item.id() {
                     if id == "tnk-services" {
                         services_exists = true;
                     }
@@ -271,9 +246,9 @@ async fn check_managed_containers() -> Result<(), color_eyre::Report> {
             let count = items
                 .iter()
                 .filter(|item| {
-                    container_id_from_item(item)
+                    item.id()
                         .is_some_and(|id| id.starts_with("tnk-") || id == "tnk-services")
-                        && container_has_label(item, "tnk.managed", "true")
+                        && item.label("tnk.managed").is_some_and(|v| v == "true")
                 })
                 .count();
             crate::ui::log_info(&format!("managed containers detected: {}", count));

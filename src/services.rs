@@ -13,41 +13,56 @@
 // limitations under the License.
 
 use std::io::IsTerminal;
-use std::io::Read;
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
 
-fn has_label(item: &serde_json::Value, key: &str, expected: &str) -> bool {
-    item.get("configuration")
-        .and_then(|v| v.get("labels"))
-        .and_then(|v| v.get(key))
-        .and_then(|v| v.as_str())
-        .is_some_and(|v| v == expected)
-}
+use std::time::{Duration, Instant};
 
-fn container_matches_id(item: &serde_json::Value, container_id: &str) -> bool {
-    item.get("id")
-        .or_else(|| item.get("ID"))
-        .or_else(|| item.get("Id"))
-        .and_then(|v| v.as_str())
-        .or_else(|| {
-            item.get("configuration")
-                .or_else(|| item.get("Configuration"))
-                .or_else(|| item.get("config"))
-                .or_else(|| item.get("Config"))
-                .and_then(|v| v.get("id").or_else(|| v.get("ID")).or_else(|| v.get("Id")))
-                .and_then(|v| v.as_str())
-        })
-        == Some(container_id)
+use crate::lifecycle;
+use crate::sandbox::container_utils::{self, ContainerListItem};
+use tokio::fs;
+use tokio::process::Command;
+use tokio::task::spawn_blocking;
+
+fn container_matches_id(item: &ContainerListItem, container_id: &str) -> bool {
+    item.id() == Some(container_id)
 }
 
 const SEARXNG_CONFIG_REV: &str = "v3";
 
-fn generate_searxng_secret() -> Result<String, color_eyre::Report> {
+async fn container_exec(
+    label: &str,
+    args: &[&str],
+) -> Result<std::process::ExitStatus, color_eyre::Report> {
+    let label = label.to_owned();
+    let args: Vec<String> = args.iter().map(|&s| s.to_owned()).collect();
+    let res =
+        spawn_blocking(move || std::process::Command::new("container").args(&args).status()).await;
+    match res {
+        Ok(inner) => inner.map_err(|e| color_eyre::eyre::eyre!("{label}: {e}")),
+        Err(e) => Err(color_eyre::eyre::eyre!("{label}: {e}")),
+    }
+}
+
+async fn container_output(
+    label: &str,
+    args: &[&str],
+) -> Result<std::process::Output, color_eyre::Report> {
+    let label = label.to_owned();
+    let args: Vec<String> = args.iter().map(|&s| s.to_owned()).collect();
+    let res =
+        spawn_blocking(move || std::process::Command::new("container").args(&args).output()).await;
+    match res {
+        Ok(inner) => inner.map_err(|e| color_eyre::eyre::eyre!("{label}: {e}")),
+        Err(e) => Err(color_eyre::eyre::eyre!("{label}: {e}")),
+    }
+}
+
+async fn generate_searxng_secret() -> Result<String, color_eyre::Report> {
     const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
     let mut bytes = [0_u8; 32];
-    let mut source = std::fs::File::open("/dev/urandom")?;
-    source.read_exact(&mut bytes)?;
+    let mut source = tokio::fs::File::open("/dev/urandom").await?;
+    use tokio::io::AsyncReadExt;
+    source.read_exact(&mut bytes).await?;
 
     let secret: String = bytes
         .iter()
@@ -56,54 +71,8 @@ fn generate_searxng_secret() -> Result<String, color_eyre::Report> {
     Ok(secret)
 }
 
-fn discover_container_gateway() -> Option<String> {
-    let output = Command::new("container")
-        .args(["network", "list", "--format", "json"])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-
-    let entries = serde_json::from_slice::<Vec<serde_json::Value>>(&output.stdout).ok()?;
-    for entry in entries {
-        let candidates = [
-            entry.get("gateway"),
-            entry.get("Gateway"),
-            entry.get("status").and_then(|v| v.get("ipv4Gateway")),
-            entry.get("status").and_then(|v| v.get("ipv6Gateway")),
-            entry.get("status").and_then(|v| v.get("gateway")),
-            entry.get("Status").and_then(|v| v.get("IPv4Gateway")),
-            entry.get("Status").and_then(|v| v.get("IPv6Gateway")),
-            entry.get("Status").and_then(|v| v.get("Gateway")),
-            entry.get("ipam").and_then(|v| v.get("gateway")),
-            entry.get("IPAM").and_then(|v| v.get("Gateway")),
-            entry
-                .get("subnets")
-                .and_then(|v| v.as_array())
-                .and_then(|arr| arr.first())
-                .and_then(|v| v.get("gateway")),
-            entry
-                .get("Subnets")
-                .and_then(|v| v.as_array())
-                .and_then(|arr| arr.first())
-                .and_then(|v| v.get("Gateway")),
-        ];
-
-        for candidate in candidates.into_iter().flatten() {
-            if let Some(ip) = candidate.as_str()
-                && !ip.trim().is_empty()
-            {
-                return Some(ip.trim().to_string());
-            }
-        }
-    }
-
-    None
-}
-
-fn resolve_host_gateway() -> Result<String, color_eyre::Report> {
-    if let Ok(cfg) = crate::config::load()
+async fn resolve_host_gateway() -> Result<String, color_eyre::Report> {
+    if let Ok(cfg) = crate::config::load().await
         && let Some(configured) = cfg.container_host_gateway
     {
         let host = configured.trim().to_string();
@@ -119,17 +88,19 @@ fn resolve_host_gateway() -> Result<String, color_eyre::Report> {
     {
         return Ok(env_host.trim().to_string());
     }
-    discover_container_gateway().ok_or_else(|| {
-        color_eyre::eyre::eyre!(
-            "could not determine container host gateway; set TNK_CONTAINER_HOST_GATEWAY or container_host_gateway in config"
-        )
-    })
+    container_utils::discover_container_gateway()
+        .await
+        .ok_or_else(|| {
+            color_eyre::eyre::eyre!(
+                "could not determine container host gateway; set TNK_CONTAINER_HOST_GATEWAY or container_host_gateway in config"
+            )
+        })
 }
 
 fn resolve_services_runtime(
     runtime_flag: Option<String>,
 ) -> Result<crate::sandbox::Runtime, color_eyre::Report> {
-    let cfg = crate::config::load()?;
+    let cfg = crate::config::load_blocking()?;
     crate::sandbox::resolve_runtime(runtime_flag, cfg.default_sandbox_runtime)
 }
 
@@ -161,20 +132,23 @@ async fn start_container(dry_run: bool) -> Result<(), color_eyre::Report> {
         return Ok(());
     }
 
-    ensure_runtime_exclusive_container()?;
+    let _lock = lifecycle::acquire("services-runtime", Duration::from_secs(20)).await?;
+    ensure_runtime_exclusive_container().await?;
 
     let container_id = "tnk-services";
     let searxng_container_id = "tnk-searxng";
     let home = std::env::var("HOME")?;
-    let searxng_settings_path = ensure_searxng_settings(&home)?;
+    let searxng_settings_path = ensure_searxng_settings(&home).await?;
 
-    if is_container_exists_any(searxng_container_id)
-        && !container_has_label(searxng_container_id, "tnk.config-rev", SEARXNG_CONFIG_REV)
+    if is_container_exists_any(searxng_container_id).await
+        && !container_has_label(searxng_container_id, "tnk.config-rev", SEARXNG_CONFIG_REV).await
     {
         crate::ui::log_info("recreating tnk-searxng container for updated config");
-        let delete_status = Command::new("container")
-            .args(["delete", "--force", searxng_container_id])
-            .status()?;
+        let delete_status = container_exec(
+            "recreate searxng",
+            &["delete", "--force", searxng_container_id],
+        )
+        .await?;
         if !delete_status.success() {
             return Err(color_eyre::eyre::eyre!(
                 "failed to recreate tnk-searxng container"
@@ -182,15 +156,23 @@ async fn start_container(dry_run: bool) -> Result<(), color_eyre::Report> {
         }
     }
 
-    if !is_container_exists_any(searxng_container_id) {
+    if !is_container_exists_any(searxng_container_id).await {
         crate::ui::log_info("creating tnk-searxng container");
         let settings_mount = format!(
             "{}:/etc/searxng/settings.yml",
             searxng_settings_path.to_string_lossy()
         );
-        let searxng_secret = generate_searxng_secret()?;
-        let status = Command::new("container")
-            .args([
+        let searxng_secret = generate_searxng_secret().await?;
+        let cache_dir = PathBuf::from(&home).join(".cache/tnk");
+        tokio::fs::create_dir_all(&cache_dir).await?;
+        let secret_path = cache_dir.join("searxng-secret");
+        if !secret_path.exists() {
+            fs::write(&secret_path, format!("SEARXNG_SECRET={}\n", searxng_secret)).await?;
+        }
+        let secret_mount = format!("{}:/run/secrets/searxng-secret:ro", secret_path.display());
+        let status = container_exec(
+            "create searxng",
+            &[
                 "create",
                 "--name",
                 searxng_container_id,
@@ -205,11 +187,14 @@ async fn start_container(dry_run: bool) -> Result<(), color_eyre::Report> {
                 "18766:8080",
                 "--volume",
                 &settings_mount,
-                "--env",
-            ])
-            .arg(format!("SEARXNG_SECRET={}", searxng_secret))
-            .arg("docker.io/searxng/searxng:latest")
-            .status()?;
+                "--volume",
+                &secret_mount,
+                "--env-file",
+                "/run/secrets/searxng-secret",
+                "docker.io/searxng/searxng:latest",
+            ],
+        )
+        .await?;
         if !status.success() {
             return Err(color_eyre::eyre::eyre!(
                 "failed to create tnk-searxng container"
@@ -217,11 +202,9 @@ async fn start_container(dry_run: bool) -> Result<(), color_eyre::Report> {
         }
     }
 
-    if !is_container_running(searxng_container_id) {
+    if !is_container_running(searxng_container_id).await {
         crate::ui::log_info("starting tnk-searxng container");
-        let status = Command::new("container")
-            .args(["start", searxng_container_id])
-            .status()?;
+        let status = container_exec("start searxng", &["start", searxng_container_id]).await?;
         if !status.success() {
             return Err(color_eyre::eyre::eyre!(
                 "failed to start tnk-searxng container"
@@ -229,10 +212,11 @@ async fn start_container(dry_run: bool) -> Result<(), color_eyre::Report> {
         }
     }
 
-    if !is_container_exists_any(container_id) {
+    if !is_container_exists_any(container_id).await {
         crate::ui::log_info("creating tnk-services container");
-        let status = Command::new("container")
-            .args([
+        let status = container_exec(
+            "create services",
+            &[
                 "create",
                 "--name",
                 container_id,
@@ -249,8 +233,9 @@ async fn start_container(dry_run: bool) -> Result<(), color_eyre::Report> {
                 "sh",
                 "-lc",
                 "while true; do sleep 3600; done",
-            ])
-            .status()?;
+            ],
+        )
+        .await?;
         if !status.success() {
             return Err(color_eyre::eyre::eyre!(
                 "failed to create tnk-services container"
@@ -258,11 +243,9 @@ async fn start_container(dry_run: bool) -> Result<(), color_eyre::Report> {
         }
     }
 
-    if !is_container_running(container_id) {
+    if !is_container_running(container_id).await {
         crate::ui::log_info("starting tnk-services container");
-        let status = Command::new("container")
-            .args(["start", container_id])
-            .status()?;
+        let status = container_exec("start services", &["start", container_id]).await?;
         if !status.success() {
             return Err(color_eyre::eyre::eyre!(
                 "failed to start tnk-services container"
@@ -273,57 +256,79 @@ async fn start_container(dry_run: bool) -> Result<(), color_eyre::Report> {
         return Ok(());
     }
 
-    ensure_services_runtime_baseline(container_id)?;
+    ensure_services_runtime_baseline(container_id).await?;
 
-    if !is_container_provisioned(container_id) {
-        let host_gateway = resolve_host_gateway()?;
+    if !is_container_provisioned(container_id).await {
+        let host_gateway = resolve_host_gateway().await?;
         let searxng_url = format!("http://{}:18766", host_gateway);
 
-        let mut cp_cmd = Command::new("container");
-        cp_cmd.args([
-            "copy",
-            &format!(
-                "{}/.config/tnk/sandbox.d/container/provision.d/tnk-services.sh",
-                home
-            ),
-            &format!("{}:/tmp/tnk-services.sh", container_id),
-        ]);
-        if !cp_cmd.status()?.success() {
-            return Err(color_eyre::eyre::eyre!(
-                "failed to copy provision script into services container"
-            ));
-        }
+        let home = home.clone();
+        let provision_result: Result<(), color_eyre::Report> = spawn_blocking(move || {
+            let provision_script = PathBuf::from(&home)
+                .join(".config/tnk/sandbox.d/container/provision.d/tnk-services.sh");
+            if !provision_script.is_file() {
+                return Err(color_eyre::eyre::eyre!(
+                    "services provision script not found at {}; run `tnk init --force`",
+                    provision_script.display()
+                ));
+            }
 
-        let mut cp_lib_cmd = Command::new("container");
-        cp_lib_cmd.args([
-            "copy",
-            &format!("{}/.config/tnk/sandbox.d/container/provision.d/lib", home),
-            &format!("{}:/tmp", container_id),
-        ]);
-        if !cp_lib_cmd.status()?.success() {
-            return Err(color_eyre::eyre::eyre!(
-                "failed to copy provision library into services container"
-            ));
-        }
+            let provision_lib =
+                PathBuf::from(&home).join(".config/tnk/sandbox.d/container/provision.d/lib");
 
-        let mut provision_cmd = Command::new("container");
-        provision_cmd.args([
-            "exec",
-            "--env",
-            &format!("TNK_SEARXNG_URL={}", searxng_url),
-            "--user",
-            "tnk",
-            container_id,
-            "bash",
-            "/tmp/tnk-services.sh",
-        ]);
-        if provision_cmd.status()?.success() {
-            crate::ui::log_info("tnk-services container provisioned");
-        } else {
-            return Err(color_eyre::eyre::eyre!(
-                "tnk-services container provisioning failed"
-            ));
-        }
+            let mut cp_cmd = std::process::Command::new("container");
+            cp_cmd.args([
+                "copy",
+                provision_script.to_str().ok_or_else(|| {
+                    color_eyre::eyre::eyre!("provision script path contains invalid UTF-8")
+                })?,
+                &format!("{}:/tmp/tnk-services.sh", container_id),
+            ]);
+            if !cp_cmd.status()?.success() {
+                return Err(color_eyre::eyre::eyre!(
+                    "failed to copy provision script into services container"
+                ));
+            }
+
+            if provision_lib.is_dir() {
+                let mut cp_lib_cmd = std::process::Command::new("container");
+                cp_lib_cmd.args([
+                    "copy",
+                    provision_lib.to_str().ok_or_else(|| {
+                        color_eyre::eyre::eyre!("provision lib path contains invalid UTF-8")
+                    })?,
+                    &format!("{}:/tmp", container_id),
+                ]);
+                if !cp_lib_cmd.status()?.success() {
+                    return Err(color_eyre::eyre::eyre!(
+                        "failed to copy provision library into services container"
+                    ));
+                }
+            }
+
+            let mut provision_cmd = std::process::Command::new("container");
+            provision_cmd.args([
+                "exec",
+                "--env",
+                &format!("TNK_SEARXNG_URL={}", searxng_url),
+                "--user",
+                "tnk",
+                container_id,
+                "bash",
+                "/tmp/tnk-services.sh",
+            ]);
+            if provision_cmd.status()?.success() {
+                crate::ui::log_info("tnk-services container provisioned");
+            } else {
+                return Err(color_eyre::eyre::eyre!(
+                    "tnk-services container provisioning failed"
+                ));
+            }
+            Ok(())
+        })
+        .await
+        .map_err(|e| color_eyre::eyre::eyre!("provision task error: {}", e))?;
+        provision_result?;
     }
 
     crate::ui::log_info("searxng:  http://127.0.0.1:18766 (browser access)");
@@ -347,35 +352,44 @@ async fn stop_container(dry_run: bool) -> Result<(), color_eyre::Report> {
 
     let container_id = "tnk-services";
     let searxng_container_id = "tnk-searxng";
-    if !is_container_exists(container_id) && !is_container_exists(searxng_container_id) {
+    if !is_container_exists(container_id).await && !is_container_exists(searxng_container_id).await
+    {
         return Ok(());
     }
 
-    if is_container_exists(container_id) {
-        let output = Command::new("container")
-            .args(["stop", container_id])
-            .output()
+    if is_container_exists(container_id).await {
+        let output = container_output("stop services", &["stop", container_id])
+            .await
             .ok();
 
         match output {
             Some(out) if out.status.success() => {
-                crate::ui::log_info(&format!("stopped {}", container_id))
+                crate::ui::log_info(&format!("stopped {}", container_id));
             }
-            Some(_) | None => eprintln!("warning: failed to stop {}", container_id),
+            Some(_) => {
+                eprintln!("warning: failed to stop {}", container_id);
+            }
+            None => {
+                eprintln!("warning: failed to stop {}", container_id);
+            }
         }
     }
 
-    if is_container_exists(searxng_container_id) {
-        let output = Command::new("container")
-            .args(["stop", searxng_container_id])
-            .output()
+    if is_container_exists(searxng_container_id).await {
+        let output = container_output("stop searxng", &["stop", searxng_container_id])
+            .await
             .ok();
 
         match output {
             Some(out) if out.status.success() => {
-                crate::ui::log_info(&format!("stopped {}", searxng_container_id))
+                crate::ui::log_info(&format!("stopped {}", searxng_container_id));
             }
-            Some(_) | None => eprintln!("warning: failed to stop {}", searxng_container_id),
+            Some(_) => {
+                eprintln!("warning: failed to stop {}", searxng_container_id);
+            }
+            None => {
+                eprintln!("warning: failed to stop {}", searxng_container_id);
+            }
         }
     }
 
@@ -396,17 +410,18 @@ async fn status_container(output: crate::OutputFormat) -> Result<(), color_eyre:
     let container_id = "tnk-services";
     let searxng_container_id = "tnk-searxng";
 
-    if !is_container_exists(container_id) && !is_container_exists(searxng_container_id) {
+    if !is_container_exists(container_id).await && !is_container_exists(searxng_container_id).await
+    {
         return Ok(());
     }
 
-    let status = if is_container_running(container_id) {
+    let status = if is_container_running(container_id).await {
         "running"
     } else {
         "stopped"
     };
-    let searxng_status = if is_container_exists(searxng_container_id) {
-        Some(if is_container_running(searxng_container_id) {
+    let searxng_status = if is_container_exists(searxng_container_id).await {
+        Some(if is_container_running(searxng_container_id).await {
             "running"
         } else {
             "stopped"
@@ -414,7 +429,8 @@ async fn status_container(output: crate::OutputFormat) -> Result<(), color_eyre:
     } else {
         None
     };
-    let provisioned = is_container_running(container_id) && is_container_provisioned(container_id);
+    let provisioned =
+        is_container_running(container_id).await && is_container_provisioned(container_id).await;
 
     match output {
         crate::OutputFormat::Text => {
@@ -461,16 +477,16 @@ async fn restart_container(dry_run: bool) -> Result<(), color_eyre::Report> {
     Ok(())
 }
 
-fn lima_services_exist_any() -> bool {
-    lima_instance_exists("tnk-services") || lima_instance_exists("tnk-searxng")
+async fn lima_services_exist_any() -> bool {
+    lima_instance_exists("tnk-services").await || lima_instance_exists("tnk-searxng").await
 }
 
-fn container_services_exist_any() -> bool {
-    is_container_exists_any("tnk-services") || is_container_exists_any("tnk-searxng")
+async fn container_services_exist_any() -> bool {
+    is_container_exists_any("tnk-services").await || is_container_exists_any("tnk-searxng").await
 }
 
-fn ensure_runtime_exclusive_container() -> Result<(), color_eyre::Report> {
-    if lima_services_exist_any() {
+async fn ensure_runtime_exclusive_container() -> Result<(), color_eyre::Report> {
+    if lima_services_exist_any().await {
         return Err(color_eyre::eyre::eyre!(
             "lima services are present; switch to lima runtime or delete lima services first"
         ));
@@ -478,8 +494,8 @@ fn ensure_runtime_exclusive_container() -> Result<(), color_eyre::Report> {
     Ok(())
 }
 
-fn ensure_runtime_exclusive_lima() -> Result<(), color_eyre::Report> {
-    if container_services_exist_any() {
+async fn ensure_runtime_exclusive_lima() -> Result<(), color_eyre::Report> {
+    if container_services_exist_any().await {
         return Err(color_eyre::eyre::eyre!(
             "container services are present; switch to container runtime or delete container services first"
         ));
@@ -487,8 +503,8 @@ fn ensure_runtime_exclusive_lima() -> Result<(), color_eyre::Report> {
     Ok(())
 }
 
-fn run_limactl(args: &[&str]) -> Result<std::process::Output, color_eyre::Report> {
-    let output = Command::new("limactl").args(args).output()?;
+async fn limactl_output(args: &[&str]) -> Result<std::process::Output, color_eyre::Report> {
+    let output = Command::new("limactl").args(args).output().await?;
     if crate::ui::is_verbose() {
         use std::io::Write;
         let _ = std::io::stderr().write_all(&output.stdout);
@@ -497,11 +513,19 @@ fn run_limactl(args: &[&str]) -> Result<std::process::Output, color_eyre::Report
     Ok(output)
 }
 
-fn run_limactl_or_err(args: &[&str], context: &str) -> Result<(), color_eyre::Report> {
-    let output = run_limactl(args)?;
+async fn limactl_run_or_err(args: &[&str], context: &str) -> Result<(), color_eyre::Report> {
+    let output = tokio::time::timeout(Duration::from_secs(300), limactl_output(args)).await;
+    let output = match output {
+        Ok(result) => result?,
+        Err(_) => {
+            return Err(color_eyre::eyre::eyre!("{}: timed out after 300s", context));
+        }
+    };
+
     if output.status.success() {
         return Ok(());
     }
+
     let stderr = String::from_utf8_lossy(&output.stderr);
     Err(color_eyre::eyre::eyre!(
         "{}: {}",
@@ -510,34 +534,50 @@ fn run_limactl_or_err(args: &[&str], context: &str) -> Result<(), color_eyre::Re
     ))
 }
 
-fn lima_instance_exists(id: &str) -> bool {
-    let output = Command::new("limactl")
+async fn lima_instance_exists(id: &str) -> bool {
+    let Some(items) = Command::new("limactl")
         .args(["list", "--format", "{{.Name}}"])
         .output()
-        .ok();
-    match output {
-        Some(out) if out.status.success() => String::from_utf8_lossy(&out.stdout)
-            .lines()
-            .any(|line| line.trim() == id),
-        _ => false,
+        .await
+        .ok()
+    else {
+        return false;
+    };
+    if !items.status.success() {
+        return false;
     }
+    String::from_utf8_lossy(&items.stdout)
+        .lines()
+        .any(|line| line.trim() == id)
 }
 
-fn lima_instance_running(id: &str) -> bool {
+async fn lima_instance_running(id: &str) -> bool {
     let output = Command::new("limactl")
         .args(["list", "--format", "{{.Status}}", id])
         .output()
-        .ok();
-    match output {
-        Some(out) if out.status.success() => String::from_utf8_lossy(&out.stdout)
-            .trim()
-            .eq_ignore_ascii_case("running"),
-        _ => false,
-    }
+        .await;
+    output
+        .ok()
+        .map(|out| {
+            if out.status.success() {
+                String::from_utf8_lossy(&out.stdout)
+                    .trim()
+                    .eq_ignore_ascii_case("running")
+            } else {
+                false
+            }
+        })
+        .unwrap_or(false)
 }
 
 fn lima_services_template() -> String {
-    "base: template:default
+    let provision = crate::sandbox::shared::BASELINE_PROVISION_SCRIPT
+        .lines()
+        .map(|line| format!("      {line}\n"))
+        .collect::<String>();
+    format!(
+        "\
+base: template:default
 vmType: vz
 arch: aarch64
 cpus: 2
@@ -549,17 +589,7 @@ hostResolver:
 provision:
   - mode: system
     script: |
-      #!/usr/bin/env bash
-      set -eu
-      export DEBIAN_FRONTEND=noninteractive
-      apt-get update -qq
-      apt-get install -y -qq bash ca-certificates curl nodejs npm sudo
-      id -u tnk >/dev/null 2>&1 || useradd -m -s /bin/bash tnk
-      usermod -aG sudo tnk
-      install -d -m 755 /etc/sudoers.d
-      printf 'tnk ALL=(ALL) NOPASSWD:ALL\\n' >/etc/sudoers.d/tnk
-      chmod 0440 /etc/sudoers.d/tnk
-portForwards:
+{provision}portForwards:
   - guestIP: 127.0.0.1
     guestPort: 18766
     hostIP: 127.0.0.1
@@ -571,61 +601,116 @@ portForwards:
 ssh:
   loadDotSSHPubKeys: false
 "
-    .to_string()
+    )
 }
 
-fn ensure_lima_services_instance() -> Result<(), color_eyre::Report> {
+async fn wait_for_lima_user(
+    id: &str,
+    user: &str,
+    timeout: Duration,
+) -> Result<(), color_eyre::Report> {
+    let started = Instant::now();
+    loop {
+        let check =
+            limactl_output(&["shell", id, "--", "bash", "-lc", &format!("id -u {}", user)]).await;
+        if matches!(check, Ok(out) if out.status.success()) {
+            return Ok(());
+        }
+
+        if started.elapsed() >= timeout {
+            return Err(color_eyre::eyre::eyre!(
+                "timed out waiting for lima user '{}' in instance '{}' after {}s",
+                user,
+                id,
+                timeout.as_secs()
+            ));
+        }
+
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+}
+
+async fn ensure_lima_services_instance() -> Result<(), color_eyre::Report> {
     let id = "tnk-services";
-    if !lima_instance_exists(id) {
+    if !lima_instance_exists(id).await {
+        eprintln!(
+            "info: creating services instance '{}' (this can take a few minutes)",
+            id
+        );
         let home = std::env::var("HOME")?;
         let template_path = PathBuf::from(home)
             .join(".cache/tnk/lima")
             .join("tnk-services.yaml");
         if let Some(parent) = template_path.parent() {
-            std::fs::create_dir_all(parent)?;
+            tokio::fs::create_dir_all(parent).await?;
         }
-        std::fs::write(&template_path, lima_services_template())?;
+        tokio::fs::write(&template_path, lima_services_template()).await?;
 
         let template_arg = template_path.to_string_lossy().to_string();
-        run_limactl_or_err(
+        limactl_run_or_err(
             &["--tty=false", "start", "--name", id, &template_arg],
-            "failed to create/start lima services instance",
-        )?;
+            "failed to create/start services instance",
+        )
+        .await?;
+        eprintln!("info: services instance '{}' is running", id);
+        eprintln!("info: waiting for baseline provisioning to create user 'tnk'");
+        wait_for_lima_user(id, "tnk", Duration::from_secs(180)).await?;
         return Ok(());
     }
 
-    if !lima_instance_running(id) {
-        run_limactl_or_err(
+    if !lima_instance_running(id).await {
+        eprintln!("info: starting existing services instance '{}'", id);
+        limactl_run_or_err(
             &["--tty=false", "start", id],
-            "failed to start lima services instance",
-        )?;
+            "failed to start services instance",
+        )
+        .await?;
+        eprintln!("info: services instance '{}' is running", id);
     }
+
+    eprintln!("info: waiting for baseline provisioning to create user 'tnk'");
+    wait_for_lima_user(id, "tnk", Duration::from_secs(180)).await?;
 
     Ok(())
 }
 
-fn provision_lima_services_instance() -> Result<(), color_eyre::Report> {
+async fn provision_lima_services_instance() -> Result<(), color_eyre::Report> {
     let home = std::env::var("HOME")?;
     let script =
         PathBuf::from(&home).join(".config/tnk/sandbox.d/container/provision.d/tnk-services.sh");
-    let searxng_secret = generate_searxng_secret()?;
+    let searxng_secret = generate_searxng_secret().await?;
     let run_searxng = format!(
         "cat >/tmp/tnk-searxng-settings.yml <<'EOF'\nuse_default_settings: true\nsearch:\n  formats:\n    - html\n    - json\nserver:\n  limiter: false\nEOF\nnerdctl rm -f tnk-searxng >/dev/null 2>&1 || true\nnerdctl run -d --name tnk-searxng -p 127.0.0.1:18766:8080 -e SEARXNG_SECRET={} -v /tmp/tnk-searxng-settings.yml:/etc/searxng/settings.yml:ro docker.io/searxng/searxng:latest >/dev/null 2>&1 || true",
         searxng_secret
     );
 
+    eprintln!("info: provisioning services instance 'tnk-services'");
     let script_arg = script.to_string_lossy().to_string();
-    run_limactl_or_err(
+    eprintln!("info: copying provision script into services instance");
+    limactl_run_or_err(
         &["copy", &script_arg, "tnk-services:/tmp/tnk-services.sh"],
-        "failed to copy services provision script into lima instance",
-    )?;
+        "failed to copy services provision script into services instance",
+    )
+    .await?;
 
-    let start_searxng = run_limactl(&["shell", "tnk-services", "--", "bash", "-lc", &run_searxng])?;
-    if !start_searxng.status.success() {
-        eprintln!("warning: failed to start searxng in lima services instance");
+    eprintln!("info: starting searxng inside services instance");
+    let start_searxng = tokio::time::timeout(
+        Duration::from_secs(120),
+        limactl_output(&["shell", "tnk-services", "--", "bash", "-lc", &run_searxng]),
+    )
+    .await;
+    match start_searxng {
+        Ok(Ok(out)) if out.status.success() => {}
+        Ok(Ok(_)) | Ok(Err(_)) => {
+            eprintln!("warning: failed to start searxng in services instance");
+        }
+        Err(_) => {
+            eprintln!("warning: timed out starting searxng in services instance");
+        }
     }
 
-    run_limactl_or_err(
+    eprintln!("info: running tnk-services provision script inside services instance");
+    limactl_run_or_err(
         &[
             "shell",
             "tnk-services",
@@ -634,8 +719,9 @@ fn provision_lima_services_instance() -> Result<(), color_eyre::Report> {
             "-lc",
             "sudo -u tnk env TNK_SEARXNG_URL=http://127.0.0.1:18766 bash /tmp/tnk-services.sh",
         ],
-        "failed to provision lima services instance",
-    )?;
+        "failed to provision services instance",
+    )
+    .await?;
 
     Ok(())
 }
@@ -645,9 +731,12 @@ async fn start_lima(dry_run: bool) -> Result<(), color_eyre::Report> {
         crate::ui::log_info("dry run, skipping services start");
         return Ok(());
     }
-    ensure_runtime_exclusive_lima()?;
-    ensure_lima_services_instance()?;
-    provision_lima_services_instance()?;
+    eprintln!("info: services machine: acquiring lifecycle lock");
+    let _lock = lifecycle::acquire("services-runtime", Duration::from_secs(20)).await?;
+    eprintln!("info: services machine: checking runtime exclusivity");
+    ensure_runtime_exclusive_lima().await?;
+    ensure_lima_services_instance().await?;
+    provision_lima_services_instance().await?;
     crate::ui::log_info("searxng:  http://127.0.0.1:18766 (browser access)");
     crate::ui::log_info("mcp:      stdio bridge via limactl shell tnk-services");
     Ok(())
@@ -658,38 +747,40 @@ async fn stop_lima(dry_run: bool) -> Result<(), color_eyre::Report> {
         crate::ui::log_info("dry run, skipping services stop");
         return Ok(());
     }
-    if !lima_instance_exists("tnk-services") {
+    if !lima_instance_exists("tnk-services").await {
         return Ok(());
     }
-    run_limactl_or_err(
+    limactl_run_or_err(
         &["stop", "--force", "tnk-services"],
-        "failed to stop lima services instance",
-    )?;
+        "failed to stop services instance",
+    )
+    .await?;
     Ok(())
 }
 
-fn is_lima_services_provisioned() -> bool {
-    let output = run_limactl(&[
+async fn is_lima_services_provisioned() -> bool {
+    let output = limactl_output(&[
         "shell",
         "tnk-services",
         "--",
         "bash",
         "-lc",
-        "sudo -u tnk bash -lc 'test -f $HOME/mcp-stdio.sh && test -f $HOME/.local/lib/node_modules/mcp-searxng/dist/cli.js'",
-    ]);
+        crate::sandbox::shared::PROVISION_STATE_CHECK,
+    ])
+    .await;
 
     matches!(output, Ok(out) if out.status.success())
 }
 
 async fn status_lima(output: crate::OutputFormat) -> Result<(), color_eyre::Report> {
-    let exists = lima_instance_exists("tnk-services");
+    let exists = lima_instance_exists("tnk-services").await;
     if !exists {
         return Ok(());
     }
-    let running = lima_instance_running("tnk-services");
+    let running = lima_instance_running("tnk-services").await;
     let status = if running { "running" } else { "stopped" };
     let searxng_status = if running { "running" } else { "stopped" };
-    let provisioned = running && is_lima_services_provisioned();
+    let provisioned = running && is_lima_services_provisioned().await;
 
     match output {
         crate::OutputFormat::Text => {
@@ -721,14 +812,15 @@ async fn restart_lima(dry_run: bool) -> Result<(), color_eyre::Report> {
     start_lima(false).await
 }
 
-fn delete_lima_instance(id: &str) -> Result<(), color_eyre::Report> {
-    if !lima_instance_exists(id) {
+async fn delete_lima_instance(id: &str) -> Result<(), color_eyre::Report> {
+    if !lima_instance_exists(id).await {
         return Ok(());
     }
-    run_limactl_or_err(
+    limactl_run_or_err(
         &["delete", "--force", id],
         &format!("failed to delete lima instance '{}'", id),
-    )?;
+    )
+    .await?;
     Ok(())
 }
 
@@ -738,141 +830,77 @@ async fn delete_lima(force: bool, dry_run: bool) -> Result<(), color_eyre::Repor
         return Ok(());
     }
     if !force && !std::io::stdout().is_terminal() {
-        eprintln!("error: terminal required for deletion, use --yes");
-        std::process::exit(77);
+        return Err(color_eyre::eyre::eyre!(
+            "terminal required for deletion, use --yes"
+        ));
     }
-    delete_lima_instance("tnk-services")?;
-    delete_lima_instance("tnk-searxng")?;
+    delete_lima_instance("tnk-services").await?;
+    delete_lima_instance("tnk-searxng").await?;
     Ok(())
 }
 
-fn is_container_exists(container_id: &str) -> bool {
-    let output = Command::new("container")
-        .args(["list", "--all", "--format", "json"])
-        .output()
-        .ok()
-        .filter(|o| o.status.success());
-
-    match output {
-        Some(out) => serde_json::from_slice::<Vec<serde_json::Value>>(&out.stdout)
-            .ok()
-            .is_some_and(|items| {
-                items.iter().any(|item| {
-                    container_matches_id(item, container_id)
-                        && has_label(item, "tnk.managed", "true")
-                })
-            }),
-        None => false,
-    }
+async fn is_container_exists(container_id: &str) -> bool {
+    let Some(items) = container_utils::container_list_all().await else {
+        return false;
+    };
+    items.iter().any(|item| {
+        container_matches_id(item, container_id)
+            && item.label("tnk.managed").is_some_and(|v| v == "true")
+    })
 }
 
-fn is_container_exists_any(container_id: &str) -> bool {
-    let output = Command::new("container")
-        .args(["list", "--all", "--format", "json"])
-        .output()
-        .ok()
-        .filter(|o| o.status.success());
-
-    match output {
-        Some(out) => serde_json::from_slice::<Vec<serde_json::Value>>(&out.stdout)
-            .ok()
-            .is_some_and(|items| {
-                items
-                    .iter()
-                    .any(|item| container_matches_id(item, container_id))
-            }),
-        None => false,
-    }
+async fn is_container_exists_any(container_id: &str) -> bool {
+    let Some(items) = container_utils::container_list_all().await else {
+        return false;
+    };
+    items
+        .iter()
+        .any(|item| container_matches_id(item, container_id))
 }
 
-fn is_container_running(container_id: &str) -> bool {
-    let output = Command::new("container")
-        .args(["list", "--all", "--format", "json"])
-        .output()
-        .ok();
-
-    match output {
-        Some(out) if out.status.success() => {
-            serde_json::from_slice::<Vec<serde_json::Value>>(&out.stdout)
-                .ok()
-                .is_some_and(|items| {
-                    items.iter().any(|item| {
-                        let id_matches = container_matches_id(item, container_id);
-                        let state = item
-                            .get("status")
-                            .or_else(|| item.get("Status"))
-                            .and_then(|v| v.get("state"))
-                            .or_else(|| {
-                                item.get("status")
-                                    .or_else(|| item.get("Status"))
-                                    .and_then(|v| v.get("State"))
-                            })
-                            .and_then(|v| v.as_str())
-                            .or_else(|| {
-                                item.get("state")
-                                    .or_else(|| item.get("State"))
-                                    .and_then(|v| v.as_str())
-                            });
-                        id_matches && state == Some("running")
-                    })
-                })
-        }
-        Some(_) | None => false,
-    }
+async fn is_container_running(container_id: &str) -> bool {
+    let Some(items) = container_utils::container_list_all().await else {
+        return false;
+    };
+    items.iter().any(|item| {
+        container_matches_id(item, container_id) && item.status_state() == Some("running")
+    })
 }
 
-fn container_has_label(container_id: &str, key: &str, expected: &str) -> bool {
-    let output = Command::new("container")
-        .args(["list", "--all", "--format", "json"])
-        .output()
-        .ok();
-
-    match output {
-        Some(out) if out.status.success() => {
-            serde_json::from_slice::<Vec<serde_json::Value>>(&out.stdout)
-                .ok()
-                .is_some_and(|items| {
-                    items.iter().any(|item| {
-                        let label = item
-                            .get("configuration")
-                            .and_then(|v| v.get("labels"))
-                            .and_then(|v| v.get(key))
-                            .and_then(|v| v.as_str());
-                        container_matches_id(item, container_id) && label == Some(expected)
-                    })
-                })
-        }
-        Some(_) | None => false,
-    }
+async fn container_has_label(container_id: &str, key: &str, expected: &str) -> bool {
+    let Some(items) = container_utils::container_list_all().await else {
+        return false;
+    };
+    items
+        .iter()
+        .any(|item| container_matches_id(item, container_id) && item.label(key) == Some(expected))
 }
 
-fn ensure_searxng_settings(home: &str) -> Result<PathBuf, color_eyre::Report> {
+async fn ensure_searxng_settings(home: &str) -> Result<PathBuf, color_eyre::Report> {
     let settings_dir = PathBuf::from(home).join(".cache/tnk/searxng");
-    std::fs::create_dir_all(&settings_dir)?;
+    tokio::fs::create_dir_all(&settings_dir).await?;
     let settings_path = settings_dir.join("settings.yml");
 
     let settings = "use_default_settings: true\nsearch:\n  formats:\n    - html\n    - json\nserver:\n  limiter: false\n";
-    std::fs::write(&settings_path, settings)?;
+    if !tokio::fs::try_exists(&settings_path).await? {
+        tokio::fs::write(&settings_path, settings).await?;
+    }
 
     Ok(settings_path)
 }
 
-fn is_container_provisioned(container_id: &str) -> bool {
+async fn is_container_provisioned(container_id: &str) -> bool {
     let output = Command::new("container")
         .args(["exec", container_id])
         .arg("bash")
         .arg("-c")
-        .arg("test -f $HOME/mcp-stdio.sh && test -f $HOME/.local/lib/node_modules/mcp-searxng/dist/cli.js")
+        .arg(crate::sandbox::shared::PROVISION_STATE_CHECK)
         .output()
-        .ok();
-
-    match output {
-        Some(out) => out.status.success(),
-        None => false,
-    }
+        .await;
+    output.ok().map(|out| out.status.success()).unwrap_or(false)
 }
 
-fn ensure_services_runtime_baseline(container_id: &str) -> Result<(), color_eyre::Report> {
+async fn ensure_services_runtime_baseline(container_id: &str) -> Result<(), color_eyre::Report> {
     let marker = "/var/lib/tnk/services-baseline-v2";
     let marker_check = Command::new("container")
         .args([
@@ -882,7 +910,8 @@ fn ensure_services_runtime_baseline(container_id: &str) -> Result<(), color_eyre
             "-lc",
             &format!("test -f {}", marker),
         ])
-        .status()?;
+        .status()
+        .await?;
     if marker_check.success() {
         return Ok(());
     }
@@ -896,9 +925,10 @@ fn ensure_services_runtime_baseline(container_id: &str) -> Result<(), color_eyre
             "-lc",
             "apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq bash ca-certificates curl nodejs npm sudo && if ! id -u tnk >/dev/null 2>&1; then useradd -m -s /bin/bash tnk; fi && usermod -aG sudo tnk && install -d -m 755 /etc/sudoers.d && printf 'tnk ALL=(ALL) NOPASSWD:ALL\\n' >/etc/sudoers.d/tnk && chmod 0440 /etc/sudoers.d/tnk && mkdir -p /home/tnk/.local && chown -R tnk:tnk /home/tnk",
         ])
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .status()?;
+        .stdout(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::inherit())
+        .status()
+        .await?;
     if !deps_status.success() {
         return Err(color_eyre::eyre::eyre!(
             "failed to install tnk-services container dependencies"
@@ -913,7 +943,8 @@ fn ensure_services_runtime_baseline(container_id: &str) -> Result<(), color_eyre
             "-lc",
             &format!("mkdir -p /var/lib/tnk && touch {}", marker),
         ])
-        .status()?;
+        .status()
+        .await?;
     if !marker_status.success() {
         eprintln!("warning: failed to persist services baseline marker");
     }
@@ -941,21 +972,22 @@ async fn delete_container(force: bool, dry_run: bool) -> Result<(), color_eyre::
     let searxng_container_id = "tnk-searxng";
     let home = std::env::var("HOME")?;
 
-    if !is_container_exists(container_id) && !is_container_exists(searxng_container_id) {
+    if !is_container_exists(container_id).await && !is_container_exists(searxng_container_id).await
+    {
         return Ok(());
     }
 
     if !force && !std::io::stdout().is_terminal() {
-        eprintln!("error: terminal required for deletion, use --yes");
-        std::process::exit(77);
+        return Err(color_eyre::eyre::eyre!(
+            "terminal required for deletion, use --yes"
+        ));
     }
 
-    if is_container_exists(container_id) {
+    if is_container_exists(container_id).await {
         crate::ui::log_info("deleting tnk-services container");
 
-        let delete_status = Command::new("container")
-            .args(["delete", "--force", container_id])
-            .output()?;
+        let delete_status =
+            container_output("delete services", &["delete", "--force", container_id]).await?;
 
         if !delete_status.status.success() {
             return Err(color_eyre::eyre::eyre!(
@@ -966,11 +998,13 @@ async fn delete_container(force: bool, dry_run: bool) -> Result<(), color_eyre::
         crate::ui::log_info(&format!("deleted {}", container_id));
     }
 
-    if is_container_exists(searxng_container_id) {
+    if is_container_exists(searxng_container_id).await {
         crate::ui::log_info("deleting tnk-searxng container");
-        let delete_status = Command::new("container")
-            .args(["delete", "--force", searxng_container_id])
-            .output()?;
+        let delete_status = container_output(
+            "delete searxng",
+            &["delete", "--force", searxng_container_id],
+        )
+        .await?;
         if !delete_status.status.success() {
             return Err(color_eyre::eyre::eyre!(
                 "failed to delete tnk-searxng container"
@@ -979,10 +1013,17 @@ async fn delete_container(force: bool, dry_run: bool) -> Result<(), color_eyre::
         crate::ui::log_info(&format!("deleted {}", searxng_container_id));
     }
 
-    let searxng_cache_dir = PathBuf::from(home).join(".cache/tnk/searxng");
+    let home2 = home.clone();
+    let searxng_cache_dir = PathBuf::from(&home).join(".cache/tnk/searxng");
     if searxng_cache_dir.exists() {
-        std::fs::remove_dir_all(&searxng_cache_dir)?;
+        fs::remove_dir_all(&searxng_cache_dir).await?;
         crate::ui::log_info(&format!("removed {}", searxng_cache_dir.display()));
+    }
+
+    let secret_path = PathBuf::from(home2).join(".cache/tnk/searxng-secret");
+    if secret_path.exists() {
+        fs::remove_file(&secret_path).await?;
+        crate::ui::log_info(&format!("removed {}", secret_path.display()));
     }
 
     Ok(())

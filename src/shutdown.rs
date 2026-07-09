@@ -15,7 +15,7 @@
 use tokio::process::Command as AsyncCommand;
 
 fn selected_runtime() -> crate::sandbox::Runtime {
-    crate::config::load()
+    crate::config::load_blocking()
         .ok()
         .and_then(|cfg| crate::sandbox::resolve_runtime(None, cfg.default_sandbox_runtime).ok())
         .unwrap_or_default()
@@ -133,10 +133,6 @@ async fn stop_lima(name: String) {
 
 async fn stop_engine() {
     let mut had_any = false;
-    let default_runtime = crate::config::load()
-        .ok()
-        .and_then(|cfg| cfg.default_engine_runtime)
-        .unwrap_or_else(|| "llama".to_string());
 
     if crate::engine::is_running().await {
         had_any = true;
@@ -149,18 +145,14 @@ async fn stop_engine() {
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         if crate::engine::is_running().await {
             eprintln!("warning: inference engine still running after stop request; retrying");
-            if let Err(err) = crate::engine::stop(&default_runtime).await {
-                eprintln!("warning: second stop attempt failed: {}", err);
+            if let Err(err) = crate::engine::stop_all().await {
+                eprintln!("warning: second stop_all attempt failed: {}", err);
             }
         }
     }
 }
 
-pub async fn run(
-    timeout_secs: Option<u64>,
-    _yes: bool,
-    dry_run: bool,
-) -> Result<(), color_eyre::Report> {
+pub async fn run(timeout_secs: Option<u64>, dry_run: bool) -> Result<(), color_eyre::Report> {
     if dry_run {
         crate::ui::log_info("dry run, skipping shutdown actions");
         return Ok(());

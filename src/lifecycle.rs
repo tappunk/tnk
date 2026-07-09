@@ -12,11 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::time::Duration;
 
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
+use tokio::task::spawn_blocking;
 
 pub struct RuntimeLock {
     path: PathBuf,
@@ -24,11 +26,11 @@ pub struct RuntimeLock {
 
 impl Drop for RuntimeLock {
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.path);
+        std::fs::remove_file(&self.path).ok();
     }
 }
 
-fn is_process_alive(pid: u32) -> bool {
+pub fn is_process_alive(pid: u32) -> bool {
     unsafe { libc::kill(pid as i32, 0) == 0 }
 }
 
@@ -44,7 +46,14 @@ pub async fn acquire(name: &str, timeout: Duration) -> Result<RuntimeLock, color
     let parent = path
         .parent()
         .ok_or_else(|| color_eyre::eyre::eyre!("invalid lock path"))?;
-    fs::create_dir_all(parent).await?;
+    let parent = parent.to_path_buf();
+    fs::create_dir_all(&parent).await?;
+    spawn_blocking(move || {
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o700))
+    })
+    .await
+    .map_err(|e| color_eyre::eyre::eyre!("set cache dir permissions: {e}"))?
+    .ok();
 
     let pid = std::process::id();
     let started = std::time::Instant::now();
@@ -61,6 +70,14 @@ pub async fn acquire(name: &str, timeout: Duration) -> Result<RuntimeLock, color
             Ok(mut file) => {
                 file.write_all(pid.to_string().as_bytes()).await?;
                 file.flush().await?;
+                drop(file);
+                let lock_path = path.clone();
+                spawn_blocking(move || {
+                    std::fs::set_permissions(&lock_path, std::fs::Permissions::from_mode(0o600))
+                })
+                .await
+                .map_err(|e| color_eyre::eyre::eyre!("set lock file permissions: {e}"))?
+                .ok();
                 return Ok(RuntimeLock { path });
             }
             Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {

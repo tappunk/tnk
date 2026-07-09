@@ -56,12 +56,17 @@ fn yaml_quote(value: &str) -> String {
 fn generate_lima_yaml(host_mount_path: &Path, settings: &LimaProfileSettings) -> String {
     let mut yaml = String::new();
     let _ = writeln!(yaml, "# tnk-managed instance");
-    let _ = writeln!(yaml, "base: template:default");
     let _ = writeln!(yaml, "vmType: vz");
     let _ = writeln!(yaml, "arch: aarch64");
     let _ = writeln!(yaml, "cpus: {}", settings.cpus);
     let _ = writeln!(yaml, "memory: {}", settings.memory);
     let _ = writeln!(yaml, "disk: {}GiB", settings.disk_gib);
+    let _ = writeln!(yaml, "images:");
+    let _ = writeln!(
+        yaml,
+        "  - location: https://cloud-images.ubuntu.com/releases/24.04/release/ubuntu-24.04-server-cloudimg-arm64.img"
+    );
+    let _ = writeln!(yaml, "    arch: aarch64");
 
     let _ = writeln!(yaml, "mounts:");
     let _ = writeln!(

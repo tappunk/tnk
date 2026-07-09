@@ -15,17 +15,20 @@
 use crate::sandbox::Runtime;
 use crate::{config, lifecycle, ui};
 
+use super::types::{
+    TerminalStateGuard, resolve_audit_logger, shell_escape, validate_engine_runtime,
+    validate_script_name,
+};
 use super::{BackendRuntimeContract, ProfileSettings, SandboxBackend, SandboxEntry};
 
 use std::fmt::Write;
-use std::fs::OpenOptions;
 use std::io::IsTerminal;
-use std::io::Write as IoWrite;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Instant;
 use tokio::fs;
 use tokio::process::Command;
+use tokio::task::spawn_blocking;
 
 const SAFE_ENV_ALLOWLIST: &[&str] = &["TERM", "COLORTERM", "COLUMNS", "LINES"];
 
@@ -37,45 +40,13 @@ struct LimaProfileSettings {
     workspace_guest_path: String,
 }
 
-struct TerminalStateGuard {
-    fds: Vec<(i32, libc::termios)>,
+fn lima_dir() -> Result<PathBuf, color_eyre::Report> {
+    let home = std::env::var("HOME")?;
+    Ok(PathBuf::from(home).join(".lima"))
 }
 
-impl TerminalStateGuard {
-    fn capture() -> Self {
-        let mut fds = Vec::new();
-
-        for fd in [libc::STDIN_FILENO, libc::STDOUT_FILENO, libc::STDERR_FILENO] {
-            let is_tty = unsafe { libc::isatty(fd) } == 1;
-            if !is_tty {
-                continue;
-            }
-
-            let mut termios = unsafe { std::mem::zeroed::<libc::termios>() };
-            let ok = unsafe { libc::tcgetattr(fd, &mut termios as *mut libc::termios) } == 0;
-            if ok {
-                fds.push((fd, termios));
-            }
-        }
-
-        Self { fds }
-    }
-}
-
-impl Drop for TerminalStateGuard {
-    fn drop(&mut self) {
-        for (fd, termios) in &self.fds {
-            let _ = unsafe { libc::tcsetattr(*fd, libc::TCSANOW, termios as *const libc::termios) };
-        }
-    }
-}
-
-fn lima_dir() -> PathBuf {
-    PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".lima")
-}
-
-fn lima_instance_dir(name: &str) -> PathBuf {
-    lima_dir().join(name)
+fn lima_instance_dir(name: &str) -> Result<PathBuf, color_eyre::Report> {
+    Ok(lima_dir()?.join(name))
 }
 
 fn yaml_quote(value: &str) -> String {
@@ -84,76 +55,73 @@ fn yaml_quote(value: &str) -> String {
 
 fn generate_lima_yaml(host_mount_path: &Path, settings: &LimaProfileSettings) -> String {
     let mut yaml = String::new();
-    writeln!(yaml, "# tnk-managed instance").unwrap();
-    writeln!(yaml, "base: template:default").unwrap();
-    writeln!(yaml, "vmType: vz").unwrap();
-    writeln!(yaml, "arch: aarch64").unwrap();
-    writeln!(yaml, "cpus: {}", settings.cpus).unwrap();
-    writeln!(yaml, "memory: {}", settings.memory).unwrap();
-    writeln!(yaml, "disk: {}GiB", settings.disk_gib).unwrap();
+    let _ = writeln!(yaml, "# tnk-managed instance");
+    let _ = writeln!(yaml, "base: template:default");
+    let _ = writeln!(yaml, "vmType: vz");
+    let _ = writeln!(yaml, "arch: aarch64");
+    let _ = writeln!(yaml, "cpus: {}", settings.cpus);
+    let _ = writeln!(yaml, "memory: {}", settings.memory);
+    let _ = writeln!(yaml, "disk: {}GiB", settings.disk_gib);
 
-    writeln!(yaml, "mounts:").unwrap();
-    writeln!(
+    let _ = writeln!(yaml, "mounts:");
+    let _ = writeln!(
         yaml,
         "  - location: {}",
         yaml_quote(&host_mount_path.display().to_string())
-    )
-    .unwrap();
-    writeln!(
+    );
+    let _ = writeln!(
         yaml,
         "    mountPoint: {}",
         yaml_quote(&settings.workspace_guest_path)
-    )
-    .unwrap();
-    writeln!(yaml, "    writable: true").unwrap();
+    );
+    let _ = writeln!(yaml, "    writable: true");
 
-    writeln!(yaml, "provision:").unwrap();
-    writeln!(yaml, "  - mode: system").unwrap();
-    writeln!(yaml, "    script: |").unwrap();
-    writeln!(yaml, "      #!/bin/bash").unwrap();
-    writeln!(yaml, "      set -eux -o pipefail").unwrap();
-    writeln!(yaml, "      export DEBIAN_FRONTEND=noninteractive").unwrap();
-    writeln!(yaml, "      apt-get update -qq").unwrap();
-    writeln!(
+    let _ = writeln!(yaml, "provision:");
+    let _ = writeln!(yaml, "  - mode: system");
+    let _ = writeln!(yaml, "    script: |");
+    let _ = writeln!(yaml, "      #!/bin/bash");
+    let _ = writeln!(yaml, "      set -eux -o pipefail");
+    let _ = writeln!(yaml, "      export DEBIAN_FRONTEND=noninteractive");
+    let _ = writeln!(yaml, "      apt-get update -qq");
+    let _ = writeln!(
         yaml,
         "      apt-get install -y -qq bash curl ca-certificates sudo git rsync"
-    )
-    .unwrap();
-    writeln!(yaml, "      if ! id -u tnk >/dev/null 2>&1; then").unwrap();
-    writeln!(yaml, "        useradd -m -s /bin/bash tnk").unwrap();
-    writeln!(yaml, "      fi").unwrap();
-    writeln!(yaml, "      usermod -aG sudo tnk").unwrap();
-    writeln!(yaml, "      install -d -m 755 /etc/sudoers.d").unwrap();
-    writeln!(
+    );
+    let _ = writeln!(yaml, "      if ! id -u tnk >/dev/null 2>&1; then");
+    let _ = writeln!(yaml, "        useradd -m -s /bin/bash tnk");
+    let _ = writeln!(yaml, "      fi");
+    let _ = writeln!(yaml, "      usermod -aG sudo tnk");
+    let _ = writeln!(yaml, "      install -d -m 755 /etc/sudoers.d");
+    let _ = writeln!(
         yaml,
         "      printf 'tnk ALL=(ALL) NOPASSWD:ALL\\n' >/etc/sudoers.d/tnk"
-    )
-    .unwrap();
-    writeln!(yaml, "      chmod 0440 /etc/sudoers.d/tnk").unwrap();
-    writeln!(yaml, "      mkdir -p /var/lib/tnk").unwrap();
-    writeln!(yaml, "      touch /var/lib/tnk/lima-baseline-v2").unwrap();
+    );
+    let _ = writeln!(yaml, "      chmod 0440 /etc/sudoers.d/tnk");
+    let _ = writeln!(yaml, "      mkdir -p /var/lib/tnk");
+    let _ = writeln!(yaml, "      touch /var/lib/tnk/lima-baseline-v2");
 
-    writeln!(yaml, "ssh:").unwrap();
-    writeln!(yaml, "  loadDotSSHPubKeys: false").unwrap();
+    let _ = writeln!(yaml, "ssh:");
+    let _ = writeln!(yaml, "  loadDotSSHPubKeys: false");
     yaml
 }
 
-fn instance_yaml_path(name: &str) -> PathBuf {
-    lima_instance_dir(name).join("lima.yaml")
+fn instance_yaml_path(name: &str) -> Result<PathBuf, color_eyre::Report> {
+    Ok(lima_instance_dir(name)?.join("lima.yaml"))
 }
 
-fn instance_dir(name: &str) -> PathBuf {
+fn instance_dir(name: &str) -> Result<PathBuf, color_eyre::Report> {
     lima_instance_dir(name)
 }
 
-fn generated_template_path(name: &str) -> PathBuf {
-    PathBuf::from(std::env::var("HOME").unwrap_or_default())
+fn generated_template_path(name: &str) -> Result<PathBuf, color_eyre::Report> {
+    let home = std::env::var("HOME")?;
+    Ok(PathBuf::from(home)
         .join(".cache/tnk/lima")
-        .join(format!("{}.yaml", name))
+        .join(format!("{}.yaml", name)))
 }
 
-async fn instance_exists(name: &str) -> bool {
-    instance_yaml_path(name).exists()
+async fn instance_exists(name: &str) -> Result<bool, color_eyre::Report> {
+    Ok(instance_yaml_path(name)?.exists())
 }
 
 async fn instance_is_running(name: &str) -> Result<bool, color_eyre::Report> {
@@ -217,7 +185,7 @@ async fn create_and_start_instance(
 ) -> Result<(), color_eyre::Report> {
     cleanup_stale_hostagents(id).await?;
     let template = generate_lima_yaml(host_mount_path, settings);
-    let template_path = generated_template_path(id);
+    let template_path = generated_template_path(id)?;
     if let Some(parent) = template_path.parent() {
         fs::create_dir_all(parent).await?;
     }
@@ -345,7 +313,7 @@ impl SandboxBackend for LimaBackend {
     const BINARY: &'static str = "limactl";
 
     async fn resolve_id() -> Result<(String, PathBuf, PathBuf), color_eyre::Report> {
-        super::container::resolve_workspace_context()
+        spawn_blocking(super::container::resolve_workspace_context).await?
     }
 
     async fn start(
@@ -355,7 +323,7 @@ impl SandboxBackend for LimaBackend {
         _runtime_envs: &[(String, String)],
     ) -> Result<(), color_eyre::Report> {
         let (id, project_root, _) = Self::resolve_id().await?;
-        let _audit = resolve_audit_logger(audit_log, &id)?;
+        let _audit = resolve_audit_logger(audit_log, &id).await?;
         let _lock =
             lifecycle::acquire("lima-lifecycle", std::time::Duration::from_secs(20)).await?;
 
@@ -364,7 +332,7 @@ impl SandboxBackend for LimaBackend {
         let lima_settings = lima_settings_from_profile_settings(settings)?;
         let needs_provision = profile_name != "base";
 
-        if !instance_exists(&id).await {
+        if !instance_exists(&id).await? {
             ui::log_info("creating lima instance");
             if !ui::is_quiet() {
                 eprintln!("creating sandbox {}...", id);
@@ -399,7 +367,7 @@ impl SandboxBackend for LimaBackend {
             if !ui::is_quiet() {
                 eprintln!("resolving engine model...");
             }
-            let cfg = config::load()?;
+            let cfg = config::load().await?;
             let server_port = cfg.server_port.unwrap_or(8080);
             let engine_name = cfg.default_engine_runtime.as_deref().unwrap_or("llama");
             let (active_model, ctx_window) =
@@ -435,7 +403,9 @@ impl SandboxBackend for LimaBackend {
                     return Err(color_eyre::eyre::eyre!("invalid profile cache path"));
                 };
                 fs::create_dir_all(cache_parent).await?;
-                fs::write(&cache_dir, format!("{}\n", profile_name)).await?;
+                let tmp_path = cache_dir.with_extension("tmp");
+                fs::write(&tmp_path, format!("{}\n", profile_name)).await?;
+                fs::rename(&tmp_path, &cache_dir).await?;
             } else {
                 let mut existing = fs::read_to_string(&cache_dir).await.unwrap_or_default();
                 if !existing.lines().any(|l| l.trim() == profile_name) {
@@ -444,7 +414,9 @@ impl SandboxBackend for LimaBackend {
                     }
                     existing.push_str(&profile_name);
                     existing.push('\n');
-                    fs::write(&cache_dir, existing).await?;
+                    let tmp_path = cache_dir.with_extension("tmp");
+                    fs::write(&tmp_path, existing).await?;
+                    fs::rename(&tmp_path, &cache_dir).await?;
                 }
             }
 
@@ -461,7 +433,9 @@ impl SandboxBackend for LimaBackend {
                     return Err(color_eyre::eyre::eyre!("invalid profile cache path"));
                 };
                 fs::create_dir_all(cache_parent).await?;
-                fs::write(&cache_dir, "base\n").await?;
+                let tmp_path = cache_dir.with_extension("tmp");
+                fs::write(&tmp_path, "base\n").await?;
+                fs::rename(&tmp_path, &cache_dir).await?;
             }
         }
 
@@ -505,7 +479,7 @@ impl SandboxBackend for LimaBackend {
 
         let default_settings = lima_settings_from_profile_settings(settings)?;
 
-        if !instance_exists(&id).await {
+        if !instance_exists(&id).await? {
             ui::log_info("creating lima instance");
             create_and_start_instance(&id, &project_root, &default_settings).await?;
             ui::log_info(&format!("started {}", id));
@@ -518,7 +492,7 @@ impl SandboxBackend for LimaBackend {
             && profile_name != "base"
         {
             let home = std::env::var("HOME")?;
-            let cfg = config::load()?;
+            let cfg = config::load().await?;
             let server_port = cfg.server_port.unwrap_or(8080);
             let engine_name = cfg.default_engine_runtime.as_deref().unwrap_or("llama");
             let (active_model, ctx_window) =
@@ -551,11 +525,13 @@ impl SandboxBackend for LimaBackend {
                     return Err(color_eyre::eyre::eyre!("invalid profile cache path"));
                 };
                 fs::create_dir_all(cache_parent).await?;
-                fs::write(&cache_dir, format!("{}\n", profile_name)).await?;
+                let tmp_path = cache_dir.with_extension("tmp");
+                fs::write(&tmp_path, format!("{}\n", profile_name)).await?;
+                fs::rename(&tmp_path, &cache_dir).await?;
             }
         }
 
-        let audit = resolve_audit_logger(audit_log, &id)?;
+        let audit = resolve_audit_logger(audit_log, &id).await?;
 
         let guest_mount_root = PathBuf::from(&settings.workspace_guest_path);
         let guest_workdir = match workdir.strip_prefix(&project_root) {
@@ -648,7 +624,10 @@ impl SandboxBackend for LimaBackend {
             return Ok(());
         }
 
-        std::process::exit(status.code().unwrap_or(1));
+        return Err(color_eyre::eyre::eyre!(
+            "sandbox shell exited with code {}",
+            status.code().unwrap_or(1)
+        ));
     }
 
     async fn stop(names: Vec<String>, all: bool) -> Result<(), color_eyre::Report> {
@@ -678,7 +657,7 @@ impl SandboxBackend for LimaBackend {
 
             for id in unique {
                 validate_named_lima_sandbox(&id)?;
-                if !instance_exists(&id).await {
+                if !instance_exists(&id).await? {
                     eprintln!("warning: lima instance '{}' does not exist", id);
                     continue;
                 }
@@ -699,7 +678,7 @@ impl SandboxBackend for LimaBackend {
     }
 
     async fn exists(id: &str) -> Result<bool, color_eyre::Report> {
-        Ok(instance_exists(id).await)
+        Ok(instance_exists(id).await?)
     }
 
     async fn is_running(id: &str) -> Result<bool, color_eyre::Report> {
@@ -849,54 +828,6 @@ fn lima_settings_from_profile_settings(
     })
 }
 
-fn shell_escape(s: &str) -> String {
-    format!("'{}'", s.replace('\'', "'\\''"))
-}
-
-#[derive(serde::Deserialize, Debug, Clone)]
-struct AuditLogger {
-    path: PathBuf,
-}
-
-fn resolve_audit_logger(
-    audit_log: Option<String>,
-    id: &str,
-) -> Result<Option<AuditLogger>, color_eyre::Report> {
-    let Some(path_str) = audit_log else {
-        return Ok(None);
-    };
-
-    let path = if path_str.trim().is_empty() {
-        let home = std::env::var("HOME")?;
-        let audit_dir = PathBuf::from(home).join(".cache/tnk/audit");
-        std::fs::create_dir_all(&audit_dir)?;
-        let ts = crate::sandbox::shared::now_unix_seconds();
-        audit_dir.join(format!("{}-{}.ndjson", ts, id))
-    } else {
-        PathBuf::from(path_str)
-    };
-
-    if let Some(parent) = path.parent()
-        && !parent.as_os_str().is_empty()
-    {
-        std::fs::create_dir_all(parent)?;
-    }
-
-    Ok(Some(AuditLogger { path }))
-}
-
-impl AuditLogger {
-    fn write_event(&self, event: serde_json::Value) -> Result<(), color_eyre::Report> {
-        let mut file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.path)?;
-        let serialized = serde_json::to_string(&event)?;
-        writeln!(file, "{}", serialized)?;
-        Ok(())
-    }
-}
-
 async fn stop_lima_instance() -> Result<(), color_eyre::Report> {
     let _lock = lifecycle::acquire("lima-lifecycle", std::time::Duration::from_secs(20)).await?;
     let (id, _, _) = LimaBackend::resolve_id().await?;
@@ -905,7 +836,7 @@ async fn stop_lima_instance() -> Result<(), color_eyre::Report> {
 }
 
 async fn stop_lima_instance_by_id(id: &str) -> Result<(), color_eyre::Report> {
-    if !instance_exists(id).await {
+    if !instance_exists(id).await? {
         return Ok(());
     }
 
@@ -955,11 +886,12 @@ async fn delete_lima_instance(id: &str, force: bool) -> Result<(), color_eyre::R
     let _lock = lifecycle::acquire("lima-lifecycle", std::time::Duration::from_secs(20)).await?;
 
     if !force && !std::io::stdout().is_terminal() {
-        eprintln!("error: terminal required for deletion, use --force to skip");
-        std::process::exit(77);
+        return Err(color_eyre::eyre::eyre!(
+            "terminal required for deletion, use --yes"
+        ));
     }
 
-    if !instance_exists(id).await {
+    if !instance_exists(id).await? {
         return Ok(());
     }
 
@@ -982,10 +914,10 @@ async fn delete_lima_instance(id: &str, force: bool) -> Result<(), color_eyre::R
         ));
     }
 
-    let yaml_path = instance_yaml_path(id);
+    let yaml_path = instance_yaml_path(id)?;
     let _ = fs::remove_file(&yaml_path).await;
 
-    let dir = instance_dir(id);
+    let dir = instance_dir(id)?;
     let _ = fs::remove_dir_all(&dir).await;
 
     ui::log_info(&format!("deleted {}", id));
@@ -1090,36 +1022,6 @@ async fn run_provision_lima(
     mount_path: &str,
     port: u16,
 ) -> Result<(), color_eyre::Report> {
-    fn validate_script_name(name: &str) -> Result<(), color_eyre::Report> {
-        if name.is_empty() {
-            return Err(color_eyre::eyre::eyre!("invalid profile name: empty"));
-        }
-        if name
-            .chars()
-            .any(|c| !(c.is_ascii_alphanumeric() || c == '-' || c == '_'))
-        {
-            return Err(color_eyre::eyre::eyre!(
-                "invalid profile name: unsupported characters"
-            ));
-        }
-        Ok(())
-    }
-
-    fn validate_engine_runtime(runtime: &str) -> Result<(), color_eyre::Report> {
-        if runtime.is_empty() {
-            return Err(color_eyre::eyre::eyre!("invalid runtime: empty"));
-        }
-        if runtime
-            .chars()
-            .any(|c| !(c.is_ascii_alphanumeric() || c == '-' || c == '_'))
-        {
-            return Err(color_eyre::eyre::eyre!(
-                "invalid runtime: unsupported characters"
-            ));
-        }
-        Ok(())
-    }
-
     validate_script_name(script_name)?;
     validate_engine_runtime(engine_runtime)?;
 
@@ -1140,15 +1042,20 @@ async fn run_provision_lima(
         .parent()
         .ok_or_else(|| color_eyre::eyre::eyre!("invalid provision script path"))?
         .join("lib");
-    if !host_lib_dir.is_dir() {
-        return Err(color_eyre::eyre::eyre!(
-            "provision library directory not found: {:?}",
+    let has_lib = host_lib_dir.is_dir();
+    if !has_lib {
+        ui::log_warn(&format!(
+            "provision library directory not found at {:?}; the provision script may fail if it \
+             sources files from lib/ (run `tnk init --force` to install provision assets)",
             host_lib_dir
         ));
     }
 
-    let specs_rev =
-        crate::sandbox::shared::compute_specs_revision_hash(&host_script, &host_lib_dir).await?;
+    let specs_rev = crate::sandbox::shared::compute_specs_revision_hash(
+        &host_script,
+        has_lib.then_some(&host_lib_dir),
+    )
+    .await?;
 
     let guest_provision_dir = format!("/tmp/tnk-provision-{}", script_name);
     let guest_script_path = format!("{}/{}.sh", guest_provision_dir, script_name);
@@ -1190,10 +1097,25 @@ async fn run_provision_lima(
         .output()
         .await?;
     if !lib_copy_output.status.success() {
-        return Err(color_eyre::eyre::eyre!(
-            "failed to copy provision library into lima guest for '{}'",
-            script_name
-        ));
+        crate::ui::log_warn(
+            "limactl copy --recursive failed for provision library, falling back to tar",
+        );
+        let tar_copy = Command::new("bash")
+            .arg("-c")
+            .arg(format!(
+                "cd {} && tar cf - . | limactl shell {} tar xf - -C {}",
+                host_lib_dir.display(),
+                id,
+                guest_target_lib_dir
+            ))
+            .output()
+            .await?;
+        if !tar_copy.status.success() {
+            return Err(color_eyre::eyre::eyre!(
+                "failed to copy provision library into lima guest for '{}' (both copy --recursive and tar fallback failed)",
+                script_name
+            ));
+        }
     }
 
     let provision_cmd = format!(

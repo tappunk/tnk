@@ -6,6 +6,30 @@ use tokio::fs;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
+/// Baseline provisioning script for tnk container/lima instances.
+/// Shared across services.rs, container.rs, and lima.rs provision logic.
+pub const BASELINE_PROVISION_SCRIPT: &str = "\
+#!/usr/bin/env bash
+set -eu
+export DEBIAN_FRONTEND=noninteractive
+apt-get update -qq
+apt-get install -y -qq bash ca-certificates curl nodejs npm sudo
+if ! id -u tnk >/dev/null 2>&1; then
+  useradd -m -s /bin/bash tnk
+fi
+usermod -aG sudo tnk
+install -d -m 755 /etc/sudoers.d
+printf 'tnk ALL=(ALL) NOPASSWD:ALL\\n' >/etc/sudoers.d/tnk
+chmod 0440 /etc/sudoers.d/tnk
+";
+
+/// Provision marker file created by tnk-services provision script.
+/// Shared across services.rs and engine.rs.
+pub const PROVISION_MARKER: &str = "$HOME/.tnk/provisioned-v1";
+
+/// Provision state check: verifies tnk-services provisioned state via marker file.
+pub const PROVISION_STATE_CHECK: &str = "test -f $HOME/.tnk/provisioned-v1";
+
 pub fn parse_explicit_env(input: &str) -> Result<(String, String), color_eyre::Report> {
     let Some((key, value)) = input.split_once('=') else {
         return Err(color_eyre::eyre::eyre!(
@@ -38,6 +62,16 @@ pub fn parse_explicit_env(input: &str) -> Result<(String, String), color_eyre::R
         ));
     }
 
+    const MAX_ENV_VALUE_LEN: usize = 4096;
+    if value.len() > MAX_ENV_VALUE_LEN {
+        return Err(color_eyre::eyre::eyre!(
+            "invalid --env value for '{}': exceeds {} bytes (got {})",
+            key,
+            MAX_ENV_VALUE_LEN,
+            value.len()
+        ));
+    }
+
     Ok((key.to_string(), value.to_string()))
 }
 
@@ -65,17 +99,20 @@ pub fn runtime_env_summary(envs: &[(String, String)]) -> serde_json::Value {
     serde_json::Value::Object(map)
 }
 
-pub fn collect_regular_files_recursive(root: &Path) -> Result<Vec<PathBuf>, color_eyre::Report> {
+pub async fn collect_regular_files_recursive(
+    root: &Path,
+) -> Result<Vec<PathBuf>, color_eyre::Report> {
     let mut files = Vec::new();
     let mut dirs = vec![root.to_path_buf()];
 
     while let Some(dir) = dirs.pop() {
-        for entry in std::fs::read_dir(&dir)? {
-            let entry = entry?;
+        let mut entries = fs::read_dir(&dir).await?;
+        while let Some(entry) = entries.next_entry().await? {
             let path = entry.path();
-            if path.is_dir() {
+            let metadata = fs::metadata(&path).await?;
+            if metadata.is_dir() {
                 dirs.push(path);
-            } else if path.is_file() {
+            } else {
                 files.push(path);
             }
         }
@@ -86,10 +123,12 @@ pub fn collect_regular_files_recursive(root: &Path) -> Result<Vec<PathBuf>, colo
 
 pub async fn compute_specs_revision_hash(
     script_path: &Path,
-    lib_dir: &Path,
+    lib_dir: Option<&Path>,
 ) -> Result<String, color_eyre::Report> {
     let mut files = vec![script_path.to_path_buf()];
-    files.extend(collect_regular_files_recursive(lib_dir)?);
+    if let Some(dir) = lib_dir {
+        files.extend(collect_regular_files_recursive(dir).await?);
+    }
     files.sort();
 
     let mut shasum_cmd = Command::new("shasum");
@@ -101,7 +140,7 @@ pub async fn compute_specs_revision_hash(
     let output = shasum_cmd.output().await?;
     if !output.status.success() {
         return Err(color_eyre::eyre::eyre!(
-            "failed to compute provision hash for script and library"
+            "failed to compute provision hash for script"
         ));
     }
 
@@ -135,15 +174,30 @@ pub async fn resolve_active_model_and_ctx_impl(
     engine_name: &str,
 ) -> (String, u32) {
     let default_model = crate::config::load()
+        .await
         .ok()
         .and_then(|cfg| cfg.default_engine_preset.filter(|m| !m.trim().is_empty()))
         .filter(|m| !m.trim().is_empty())
-        .unwrap_or_else(|| crate::engine::default_model_for_runtime(engine_name).to_string());
+        .unwrap_or_else(|| {
+            crate::engine::default_model_for_runtime(engine_name)
+                .unwrap_or_else(|| {
+                    crate::ui::log_warn(&format!(
+                        "unrecognized engine runtime '{engine_name}'; using default model"
+                    ));
+                    "llama"
+                })
+                .to_string()
+        });
     let preset_ctx_hint = crate::model::DEFAULT_CONTEXT_WINDOW;
 
     let active_model_file = PathBuf::from(home).join(format!(
         ".cache/tnk/{}",
-        crate::engine::active_preset_file_for_runtime(engine_name)
+        crate::engine::active_preset_file_for_runtime(engine_name).unwrap_or_else(|| {
+            crate::ui::log_warn(&format!(
+                "unrecognized engine runtime '{engine_name}'; using default preset file"
+            ));
+            "active-preset-name-llama"
+        })
     ));
     let active_model_from_file = fs::read_to_string(&active_model_file)
         .await
@@ -153,8 +207,9 @@ pub async fn resolve_active_model_and_ctx_impl(
 
     let fallback_model = active_model_from_file.unwrap_or_else(|| default_model.clone());
 
-    let parsed_model = match crate::model::poll_loaded_model("127.0.0.1", port, 20, 1.0).await {
-        Ok(model) => model,
+    let parsed_model = match crate::model::poll_loaded_model("127.0.0.1", port, 5, 1.0).await {
+        Ok(Some(model)) => model,
+        Ok(None) => fallback_model.clone(),
         Err(err) => {
             eprintln!(
                 "warning: failed to poll loaded model from inference server, using fallback: {}",
@@ -183,6 +238,31 @@ pub async fn resolve_active_model_and_ctx_impl(
     let ctx_window = std::cmp::max(model_ctx_window, preset_ctx_hint);
 
     (active_model, ctx_window)
+}
+
+pub async fn load_profile_manifest(
+    profile_name: &str,
+) -> Result<Option<crate::sandbox::SandboxManifest>, color_eyre::Report> {
+    let home = std::env::var("HOME")?;
+    let config_dir = PathBuf::from(&home).join(".config/tnk");
+    let manifest_path = crate::catalog::resolve_manifest(&config_dir, profile_name);
+    let Some(manifest_path) = manifest_path else {
+        return Ok(None);
+    };
+
+    let content = fs::read_to_string(&manifest_path).await?;
+    let manifest: Option<crate::sandbox::SandboxManifest> =
+        match serde_yaml::from_str::<crate::sandbox::SandboxManifest>(&content) {
+            Ok(m) => Ok::<_, color_eyre::Report>(Some(m)),
+            Err(e) => {
+                crate::ui::log_warn(&format!(
+                    "failed to parse manifest {}: {e}",
+                    manifest_path.display()
+                ));
+                Ok(None)
+            }
+        }?;
+    Ok(manifest)
 }
 
 #[cfg(test)]

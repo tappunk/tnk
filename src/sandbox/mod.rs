@@ -13,14 +13,17 @@
 // limitations under the License.
 
 pub mod container;
+pub mod container_utils;
 pub mod lima;
 pub mod shared;
+pub mod types;
+
+use shared::load_profile_manifest;
 
 use async_trait::async_trait;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use tokio::fs;
 
 use crate::config;
 
@@ -198,7 +201,7 @@ pub async fn sandbox_exists_with_runtime(
     id: &str,
     runtime_flag: Option<String>,
 ) -> Result<bool, color_eyre::Report> {
-    let cfg = config::load()?;
+    let cfg = config::load().await?;
     let runtime = resolve_runtime(runtime_flag, cfg.default_sandbox_runtime.clone())?;
 
     match runtime {
@@ -212,7 +215,7 @@ pub async fn stop(
     all: bool,
     runtime_flag: Option<String>,
 ) -> Result<(), color_eyre::Report> {
-    let cfg = config::load()?;
+    let cfg = config::load().await?;
     let runtime = resolve_runtime(runtime_flag, cfg.default_sandbox_runtime.clone())?;
 
     match runtime {
@@ -227,7 +230,7 @@ pub async fn delete_sandbox(
     force: bool,
     runtime_flag: Option<String>,
 ) -> Result<(), color_eyre::Report> {
-    let cfg = config::load()?;
+    let cfg = config::load().await?;
     let runtime = resolve_runtime(runtime_flag, cfg.default_sandbox_runtime.clone())?;
 
     match runtime {
@@ -242,7 +245,7 @@ pub async fn start(
     audit_log: Option<String>,
     runtime_flag: Option<String>,
 ) -> Result<(), color_eyre::Report> {
-    let cfg = config::load()?;
+    let cfg = config::load().await?;
     let runtime = resolve_runtime(runtime_flag, cfg.default_sandbox_runtime.clone())?;
     let (id, project_root, _workdir) = resolve_workspace_context()?;
 
@@ -282,7 +285,7 @@ pub async fn shell(
     audit_log: Option<String>,
     runtime_flag: Option<String>,
 ) -> Result<(), color_eyre::Report> {
-    let cfg = config::load()?;
+    let cfg = config::load().await?;
     let runtime = resolve_runtime(runtime_flag, cfg.default_sandbox_runtime.clone())?;
     let (id, project_root, _workdir) = resolve_workspace_context()?;
 
@@ -337,7 +340,7 @@ pub async fn ls(
     quiet: bool,
     runtime_flag: Option<String>,
 ) -> Result<(), color_eyre::Report> {
-    let cfg = config::load()?;
+    let cfg = config::load().await?;
     let runtime = resolve_runtime(runtime_flag, cfg.default_sandbox_runtime.clone())?;
 
     let entries = match runtime {
@@ -388,9 +391,7 @@ async fn resolve_profile_settings(
     profile_name: &str,
     _project_root: &Path,
 ) -> Result<ProfileSettings, color_eyre::Report> {
-    let manifest: Option<SandboxManifest> = load_profile_manifest(profile_name)
-        .await
-        .unwrap_or_default();
+    let manifest: Option<SandboxManifest> = load_profile_manifest(profile_name).await?;
 
     let mut settings = ProfileSettings {
         workspace_guest_path: "/workspace".to_string(),
@@ -419,19 +420,4 @@ async fn resolve_profile_settings(
     }
 
     Ok(settings)
-}
-
-async fn load_profile_manifest(
-    profile_name: &str,
-) -> Result<Option<crate::sandbox::SandboxManifest>, color_eyre::Report> {
-    let home = std::env::var("HOME")?;
-    let config_dir = PathBuf::from(&home).join(".config/tnk");
-    let manifest_path = crate::catalog::resolve_manifest(&config_dir, profile_name);
-    if !manifest_path.is_file() {
-        return Ok(None);
-    }
-
-    let content = fs::read_to_string(&manifest_path).await?;
-    let manifest: crate::sandbox::SandboxManifest = serde_yaml::from_str(&content)?;
-    Ok(Some(manifest))
 }

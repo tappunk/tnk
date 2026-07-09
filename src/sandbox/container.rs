@@ -14,12 +14,15 @@
 
 use crate::{config, lifecycle, ui};
 
-use super::{ProfileSettings, SandboxBackend, SandboxEntry};
+use super::container_utils;
+use super::shared::load_profile_manifest;
+use super::types::{
+    AuditLogger, TerminalStateGuard, resolve_audit_logger, validate_engine_runtime,
+    validate_env_value, validate_model_name,
+};
+use super::{ProfileSettings, SandboxBackend, SandboxEntry, types};
 
-use std::collections::HashMap;
-use std::fs::OpenOptions;
 use std::io::IsTerminal;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Instant;
@@ -36,26 +39,6 @@ fn quiet_cmd(cmd: &str) -> Command {
     cmd.stdout(Stdio::null());
     cmd.stderr(Stdio::null());
     cmd
-}
-
-#[derive(serde::Deserialize, Debug, Clone, Default)]
-struct SandboxManifest {
-    image: Option<String>,
-    resources: Option<ResourceLimits>,
-    mounts: Option<HashMap<String, String>>,
-    security: Option<SecurityCaps>,
-}
-
-#[derive(serde::Deserialize, Debug, Clone, Default)]
-struct ResourceLimits {
-    cpus: Option<u32>,
-    memory: Option<String>,
-}
-
-#[derive(serde::Deserialize, Debug, Clone, Default)]
-struct SecurityCaps {
-    network: Option<String>,
-    workspace_mode: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -76,48 +59,10 @@ struct ContainerProfileSettings {
     uses_golden_image: bool,
 }
 
-#[derive(Debug, Clone)]
-struct AuditLogger {
-    path: PathBuf,
-}
-
-struct TerminalStateGuard {
-    fds: Vec<(i32, libc::termios)>,
-}
-
 #[derive(Clone, Copy)]
 struct TerminalDimensions {
     rows: u16,
     cols: u16,
-}
-
-impl TerminalStateGuard {
-    fn capture() -> Self {
-        let mut fds = Vec::new();
-
-        for fd in [libc::STDIN_FILENO, libc::STDOUT_FILENO, libc::STDERR_FILENO] {
-            let is_tty = unsafe { libc::isatty(fd) } == 1;
-            if !is_tty {
-                continue;
-            }
-
-            let mut termios = unsafe { std::mem::zeroed::<libc::termios>() };
-            let ok = unsafe { libc::tcgetattr(fd, &mut termios as *mut libc::termios) } == 0;
-            if ok {
-                fds.push((fd, termios));
-            }
-        }
-
-        Self { fds }
-    }
-}
-
-impl Drop for TerminalStateGuard {
-    fn drop(&mut self) {
-        for (fd, termios) in &self.fds {
-            let _ = unsafe { libc::tcsetattr(*fd, libc::TCSANOW, termios as *const libc::termios) };
-        }
-    }
 }
 
 fn sanitize_project_name(name: &str) -> Option<String> {
@@ -141,68 +86,6 @@ fn project_name_suffix(seed: &str) -> String {
             (acc ^ u64::from(*b)).wrapping_mul(0x100000001b3)
         });
     format!("{:08x}", (hash & 0xffff_ffff) as u32)
-}
-
-impl AuditLogger {
-    fn new(path: PathBuf) -> Self {
-        Self { path }
-    }
-
-    fn write_event(&self, event: serde_json::Value) -> Result<(), color_eyre::Report> {
-        let mut file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.path)?;
-        let serialized = serde_json::to_string(&event)?;
-        writeln!(file, "{}", serialized)?;
-        Ok(())
-    }
-}
-
-fn default_audit_log_path(id: &str) -> Result<PathBuf, color_eyre::Report> {
-    let home = std::env::var("HOME")?;
-    let audit_dir = PathBuf::from(home).join(".cache/tnk/audit");
-    std::fs::create_dir_all(&audit_dir)?;
-    let ts = crate::sandbox::shared::now_unix_seconds();
-    Ok(audit_dir.join(format!("{}-{}.ndjson", ts, id)))
-}
-
-fn resolve_audit_logger(
-    audit_log: Option<String>,
-    id: &str,
-) -> Result<Option<AuditLogger>, color_eyre::Report> {
-    let Some(path_str) = audit_log else {
-        return Ok(None);
-    };
-
-    let path = if path_str.trim().is_empty() {
-        default_audit_log_path(id)?
-    } else {
-        PathBuf::from(path_str)
-    };
-
-    if let Some(parent) = path.parent()
-        && !parent.as_os_str().is_empty()
-    {
-        std::fs::create_dir_all(parent)?;
-    }
-
-    Ok(Some(AuditLogger::new(path)))
-}
-
-async fn load_profile_manifest(
-    profile_name: &str,
-) -> Result<Option<SandboxManifest>, color_eyre::Report> {
-    let home = std::env::var("HOME")?;
-    let config_dir = PathBuf::from(&home).join(".config/tnk");
-    let manifest_path = crate::catalog::resolve_manifest(&config_dir, profile_name);
-    if !manifest_path.is_file() {
-        return Ok(None);
-    }
-
-    let content = fs::read_to_string(&manifest_path).await?;
-    let manifest: SandboxManifest = serde_yaml::from_str(&content)?;
-    Ok(Some(manifest))
 }
 
 async fn container_profile_settings(
@@ -346,7 +229,7 @@ impl SandboxBackend for ContainerBackend {
     const BINARY: &'static str = "container";
 
     async fn resolve_id() -> Result<(String, PathBuf, PathBuf), color_eyre::Report> {
-        resolve_workspace_context()
+        tokio::task::spawn_blocking(resolve_workspace_context).await?
     }
 
     async fn start(
@@ -356,7 +239,7 @@ impl SandboxBackend for ContainerBackend {
         runtime_envs: &[(String, String)],
     ) -> Result<(), color_eyre::Report> {
         let (id, project_root, workdir) = Self::resolve_id().await?;
-        let audit = resolve_audit_logger(audit_log, &id)?;
+        let audit = resolve_audit_logger(audit_log, &id).await?;
 
         let settings = container_profile_settings(&profile_name, &project_root).await?;
         let needs_profile_provision = profile_name != "base" && !settings.uses_golden_image;
@@ -400,7 +283,7 @@ impl SandboxBackend for ContainerBackend {
             .ok_or_else(|| color_eyre::eyre::eyre!("guest workdir contains invalid UTF-8"))?;
 
         let home = std::env::var("HOME")?;
-        let cfg = config::load()?;
+        let cfg = config::load().await?;
         let server_port = cfg.server_port.unwrap_or(8080);
         let engine_name = cfg.default_engine_runtime.as_deref().unwrap_or("llama");
         let (active_model, ctx_window) =
@@ -439,7 +322,10 @@ impl SandboxBackend for ContainerBackend {
 
             provision_result?;
 
-            let existing_profiles = fs::read_to_string(&cache_dir).await.unwrap_or_default();
+            let existing_profiles = fs::read_to_string(&cache_dir).await.unwrap_or_else(|err| {
+                crate::ui::log_warn(&format!("failed to read profile cache: {err}"));
+                String::new()
+            });
             if !existing_profiles.lines().any(|l| l.trim() == profile_name) {
                 let mut existing = existing_profiles;
                 if !existing.is_empty() && !existing.ends_with('\n') {
@@ -451,7 +337,9 @@ impl SandboxBackend for ContainerBackend {
                     return Err(color_eyre::eyre::eyre!("invalid profile cache path"));
                 };
                 fs::create_dir_all(cache_parent).await?;
-                fs::write(&cache_dir, existing).await?;
+                let tmp_path = cache_dir.with_extension("tmp");
+                fs::write(&tmp_path, existing).await?;
+                fs::rename(&tmp_path, &cache_dir).await?;
             }
 
             mark_container_profile(&id, &profile_name).await;
@@ -474,7 +362,8 @@ impl SandboxBackend for ContainerBackend {
                 &target_args,
                 requires_tty,
                 audit.as_ref(),
-            )?;
+            )
+            .await?;
 
             return Ok(());
         }
@@ -487,7 +376,9 @@ impl SandboxBackend for ContainerBackend {
                 return Err(color_eyre::eyre::eyre!("invalid profile cache path"));
             };
             fs::create_dir_all(cache_parent).await?;
-            fs::write(&cache_dir, "base\n").await?;
+            let tmp_path = cache_dir.with_extension("tmp");
+            fs::write(&tmp_path, "base\n").await?;
+            fs::rename(&tmp_path, &cache_dir).await?;
         }
 
         mark_container_profile(&id, "base").await;
@@ -501,6 +392,7 @@ impl SandboxBackend for ContainerBackend {
             false,
             audit.as_ref(),
         )
+        .await
         .map_err(|_| color_eyre::eyre::eyre!("shell session exited with error"))?;
 
         Ok(())
@@ -531,7 +423,8 @@ impl SandboxBackend for ContainerBackend {
             .map(|entry| crate::sandbox::shared::parse_explicit_env(entry))
             .collect::<Result<Vec<_>, _>>()?;
 
-        let (id, project_root, workdir) = resolve_workspace_context()?;
+        let (id, project_root, workdir) =
+            tokio::task::spawn_blocking(resolve_workspace_context).await??;
         if id == "tnk-config" {
             return Err(color_eyre::eyre::eyre!(
                 "sandbox shell is only available inside a project directory"
@@ -544,7 +437,7 @@ impl SandboxBackend for ContainerBackend {
         let settings = ensure_container_infrastructure(&id, &project_root).await?;
         let home = std::env::var("HOME")?;
 
-        let cfg = config::load()?;
+        let cfg = config::load().await?;
         let server_port = cfg.server_port.unwrap_or(8080);
         let engine_name = cfg.default_engine_runtime.as_deref().unwrap_or("llama");
         let (active_model, ctx_window) =
@@ -582,7 +475,10 @@ impl SandboxBackend for ContainerBackend {
                     provision_result?;
 
                     let existing_profiles =
-                        fs::read_to_string(&cache_dir).await.unwrap_or_default();
+                        fs::read_to_string(&cache_dir).await.unwrap_or_else(|err| {
+                            crate::ui::log_warn(&format!("failed to read profile cache: {err}"));
+                            String::new()
+                        });
                     if !existing_profiles.lines().any(|l| l.trim() == profile_name) {
                         let mut existing = existing_profiles;
                         if !existing.is_empty() && !existing.ends_with('\n') {
@@ -594,7 +490,9 @@ impl SandboxBackend for ContainerBackend {
                             return Err(color_eyre::eyre::eyre!("invalid profile cache path"));
                         };
                         fs::create_dir_all(cache_parent).await?;
-                        fs::write(&cache_dir, existing).await?;
+                        let tmp_path = cache_dir.with_extension("tmp");
+                        fs::write(&tmp_path, existing).await?;
+                        fs::rename(&tmp_path, &cache_dir).await?;
                     }
                 }
 
@@ -604,7 +502,7 @@ impl SandboxBackend for ContainerBackend {
             }
         }
 
-        let audit = resolve_audit_logger(audit_log, &id)?;
+        let audit = resolve_audit_logger(audit_log, &id).await?;
 
         let guest_workdir = match workdir.strip_prefix(&project_root) {
             Ok(relative_workdir) => {
@@ -749,7 +647,10 @@ impl SandboxBackend for ContainerBackend {
             return Ok(());
         }
 
-        std::process::exit(status.code().unwrap_or(1));
+        return Err(color_eyre::eyre::eyre!(
+            "sandbox shell exited with code {}",
+            status.code().unwrap_or(1)
+        ));
     }
 
     async fn stop(names: Vec<String>, all: bool) -> Result<(), color_eyre::Report> {
@@ -834,7 +735,7 @@ impl SandboxBackend for ContainerBackend {
             return Ok(());
         }
 
-        let Some(items) = container_list_all().await else {
+        let Some(items) = container_utils::container_list_all().await else {
             if verbose {
                 eprintln!("warning: failed to list containers for cleanup");
             }
@@ -842,7 +743,7 @@ impl SandboxBackend for ContainerBackend {
         };
 
         for item in items {
-            let Some(container_id) = container_id_from_item(&item) else {
+            let Some(container_id) = item.id().map(|s| s.to_owned()) else {
                 continue;
             };
             if !container_id.starts_with("tnk-")
@@ -873,7 +774,8 @@ impl SandboxBackend for ContainerBackend {
                 continue;
             }
 
-            let running = container_status_from_item(&item)
+            let running = item
+                .status_state()
                 .map(|s| s.eq_ignore_ascii_case("running"))
                 .unwrap_or(false);
             if running {
@@ -955,7 +857,7 @@ pub fn resolve_workspace_context() -> Result<(String, PathBuf, PathBuf), color_e
 
     let raw_workspace_root = if let Ok(v) = std::env::var("TNK_WORKSPACE_ROOT") {
         v
-    } else if let Ok(cfg) = config::load() {
+    } else if let Ok(cfg) = config::load_blocking() {
         cfg.workspace_root
             .unwrap_or_else(|| format!("{}/src", home))
     } else {
@@ -984,7 +886,10 @@ pub fn resolve_workspace_context() -> Result<(String, PathBuf, PathBuf), color_e
                 "info: create it with 'mkdir -p {}' or set TNK_WORKSPACE_ROOT",
                 workspace_root
             );
-            std::process::exit(66);
+            return Err(color_eyre::eyre::eyre!(
+                "workspace root '{}' does not exist",
+                workspace_root
+            ));
         }
         Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {
             return Err(color_eyre::eyre::eyre!(
@@ -1064,115 +969,15 @@ fn validate_workspace_root(workspace: &Path, home: &Path) -> Result<(), color_ey
     Ok(())
 }
 
-#[derive(serde::Deserialize, Debug, Clone, Default)]
-struct ContainerListItem {
-    #[serde(default)]
-    id: Option<String>,
-    #[serde(default, alias = "ID", alias = "Id")]
-    id_alias: Option<String>,
-    #[serde(default)]
-    status: Option<serde_json::Value>,
-    #[serde(default, alias = "Status")]
-    status_alias: Option<serde_json::Value>,
-    #[serde(default)]
-    state: Option<String>,
-    #[serde(default, alias = "State")]
-    state_alias: Option<String>,
-    #[serde(default)]
-    configuration: Option<ContainerConfiguration>,
-    #[serde(default, alias = "Configuration", alias = "config", alias = "Config")]
-    configuration_alias: Option<ContainerConfiguration>,
-}
-
-#[derive(serde::Deserialize, Debug, Clone)]
-struct ContainerConfiguration {
-    #[serde(default)]
-    id: Option<String>,
-    #[serde(default, alias = "ID", alias = "Id")]
-    id_alias: Option<String>,
-    #[serde(default)]
-    labels: Option<HashMap<String, serde_json::Value>>,
-    #[serde(default, alias = "Labels")]
-    labels_alias: Option<HashMap<String, serde_json::Value>>,
-}
-
-impl ContainerListItem {
-    fn id(&self) -> Option<&str> {
-        self.id.as_deref().or(self.id_alias.as_deref()).or_else(|| {
-            self.configuration_ref()
-                .and_then(|c| c.id.as_deref().or(c.id_alias.as_deref()))
-        })
-    }
-
-    fn status_state(&self) -> Option<&str> {
-        self.status
-            .as_ref()
-            .or(self.status_alias.as_ref())
-            .and_then(|v| {
-                if let Some(s) = v.as_str() {
-                    return Some(s);
-                }
-                v.get("state")
-                    .or_else(|| v.get("State"))
-                    .and_then(|s| s.as_str())
-            })
-            .or(self.state.as_deref())
-            .or(self.state_alias.as_deref())
-    }
-
-    fn label(&self, key: &str) -> Option<&str> {
-        self.labels_ref()
-            .and_then(|labels| labels.get(key))
-            .and_then(|v| v.as_str())
-    }
-
-    fn has_profile_label(&self) -> bool {
-        self.labels_ref()
-            .is_some_and(|labels| labels.keys().any(|k| k.starts_with("tnk.profile.")))
-    }
-
-    fn configuration_ref(&self) -> Option<&ContainerConfiguration> {
-        self.configuration
-            .as_ref()
-            .or(self.configuration_alias.as_ref())
-    }
-
-    fn labels_ref(&self) -> Option<&HashMap<String, serde_json::Value>> {
-        self.configuration_ref()
-            .and_then(|c| c.labels.as_ref().or(c.labels_alias.as_ref()))
-    }
-}
-
-fn container_id_from_item(item: &ContainerListItem) -> Option<String> {
-    item.id().map(std::borrow::ToOwned::to_owned)
-}
-
-fn container_status_from_item(item: &ContainerListItem) -> Option<String> {
-    item.status_state().map(std::borrow::ToOwned::to_owned)
-}
-
-async fn container_list_all() -> Option<Vec<ContainerListItem>> {
-    let output = Command::new("container")
-        .args(["list", "--all", "--format", "json"])
-        .output()
-        .await
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-
-    serde_json::from_slice::<Vec<ContainerListItem>>(&output.stdout).ok()
-}
-
 async fn discover_managed_project_sandboxes() -> Vec<String> {
-    let Some(items) = container_list_all().await else {
+    let Some(items) = container_utils::container_list_all().await else {
         return Vec::new();
     };
 
     let mut ids: Vec<String> = items
         .iter()
         .filter_map(|item| {
-            let id = container_id_from_item(item)?;
+            let id = item.id()?.to_owned();
             if !id.starts_with("tnk-") || id == "tnk-services" || id == "tnk-searxng" {
                 return None;
             }
@@ -1287,30 +1092,28 @@ async fn mark_container_profile(id: &str, profile_name: &str) {
 }
 
 async fn container_exists(id: &str) -> bool {
-    let Some(items) = container_list_all().await else {
+    let Some(items) = container_utils::container_list_all().await else {
         return false;
     };
 
-    items
-        .iter()
-        .filter_map(container_id_from_item)
-        .any(|i| i == id)
+    items.iter().any(|item| item.id().is_some_and(|i| i == id))
 }
 
 async fn container_is_running(id: &str) -> bool {
-    let Some(items) = container_list_all().await else {
+    let Some(items) = container_utils::container_list_all().await else {
         return false;
     };
 
     items.iter().any(|item| {
-        container_id_from_item(item).is_some_and(|i| i == id)
-            && container_status_from_item(item)
+        item.id().is_some_and(|i| i == id)
+            && item
+                .status_state()
                 .map(|s| s.eq_ignore_ascii_case("running"))
                 .unwrap_or(false)
     })
 }
 
-fn run_container_session(
+async fn run_container_session(
     id: &str,
     guest_workdir: &str,
     injected_envs: &[(String, String)],
@@ -1342,7 +1145,14 @@ fn run_container_session(
         }))?;
     }
 
-    let run_once = |tty: bool| -> Result<std::process::ExitStatus, color_eyre::Report> {
+    async fn run_once(
+        id: &str,
+        guest_workdir: &str,
+        injected_envs: &[(String, String)],
+        target_args: &[&str],
+        tty: bool,
+        audit: Option<&AuditLogger>,
+    ) -> Result<std::process::ExitStatus, color_eyre::Report> {
         let _terminal_state_guard = tty.then(TerminalStateGuard::capture);
 
         let mut args: Vec<String> = vec!["exec".to_string()];
@@ -1371,21 +1181,31 @@ fn run_container_session(
             }))?;
         }
 
-        let status = std::process::Command::new("container")
+        let status = Command::new("container")
             .args(&args)
             .stdin(Stdio::inherit())
             .stdout(Stdio::inherit())
             .stderr(Stdio::inherit())
-            .status()?;
+            .status()
+            .await?;
         Ok(status)
-    };
+    }
 
-    let status = match run_once(use_tty) {
+    let status = match run_once(
+        id,
+        guest_workdir,
+        injected_envs,
+        target_args,
+        use_tty,
+        audit,
+    )
+    .await
+    {
         Ok(status) => status,
         Err(err) => {
             if use_tty && !requires_tty {
                 eprintln!("warning: interactive TTY launch failed; retrying without TTY");
-                run_once(false)?
+                run_once(id, guest_workdir, injected_envs, target_args, false, audit).await?
             } else {
                 return Err(err);
             }
@@ -1551,80 +1371,6 @@ async fn update_container_network_mode(id: &str, mode: &str) -> Result<(), color
     Ok(())
 }
 
-fn parse_gateway_from_route_output(output: &str) -> Option<String> {
-    for line in output.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-
-        let tokens: Vec<&str> = trimmed.split_whitespace().collect();
-
-        if let Some(idx) = tokens.iter().position(|t| *t == "via")
-            && let Some(candidate) = tokens.get(idx + 1)
-            && !candidate.trim().is_empty()
-        {
-            return Some(candidate.trim().to_string());
-        }
-
-        if let Some(idx) = tokens.iter().position(|t| *t == "gateway:")
-            && let Some(candidate) = tokens.get(idx + 1)
-            && !candidate.trim().is_empty()
-        {
-            return Some(candidate.trim().to_string());
-        }
-    }
-
-    None
-}
-
-async fn discover_container_gateway() -> Option<String> {
-    let output = Command::new("container")
-        .args(["network", "list", "--format", "json"])
-        .output()
-        .await
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-
-    let entries = serde_json::from_slice::<Vec<serde_json::Value>>(&output.stdout).ok()?;
-    for entry in entries {
-        let candidates = [
-            entry.get("gateway"),
-            entry.get("Gateway"),
-            entry.get("status").and_then(|v| v.get("ipv4Gateway")),
-            entry.get("status").and_then(|v| v.get("ipv6Gateway")),
-            entry.get("status").and_then(|v| v.get("gateway")),
-            entry.get("Status").and_then(|v| v.get("IPv4Gateway")),
-            entry.get("Status").and_then(|v| v.get("IPv6Gateway")),
-            entry.get("Status").and_then(|v| v.get("Gateway")),
-            entry.get("ipam").and_then(|v| v.get("gateway")),
-            entry.get("IPAM").and_then(|v| v.get("Gateway")),
-            entry
-                .get("subnets")
-                .and_then(|v| v.as_array())
-                .and_then(|arr| arr.first())
-                .and_then(|v| v.get("gateway")),
-            entry
-                .get("Subnets")
-                .and_then(|v| v.as_array())
-                .and_then(|arr| arr.first())
-                .and_then(|v| v.get("Gateway")),
-        ];
-
-        for candidate in candidates.into_iter().flatten() {
-            if let Some(ip) = candidate.as_str()
-                && !ip.trim().is_empty()
-            {
-                return Some(ip.trim().to_string());
-            }
-        }
-    }
-
-    None
-}
-
 async fn discover_gateway_from_container(id: &str) -> Option<String> {
     let output = Command::new("container")
         .args([
@@ -1643,16 +1389,16 @@ async fn discover_gateway_from_container(id: &str) -> Option<String> {
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    parse_gateway_from_route_output(&stdout)
+    container_utils::parse_gateway_from_route_output(&stdout)
 }
 
 async fn resolve_container_host_gateway(id: &str) -> Result<String, color_eyre::Report> {
-    let cfg = config::load()?;
+    let cfg = config::load().await?;
     let host = if let Some(configured) = cfg.container_host_gateway {
         configured.trim().to_string()
     } else if let Ok(env_host) = std::env::var("TNK_CONTAINER_HOST_GATEWAY") {
         env_host.trim().to_string()
-    } else if let Some(discovered) = discover_container_gateway().await {
+    } else if let Some(discovered) = container_utils::discover_container_gateway().await {
         discovered
     } else {
         discover_gateway_from_container(id)
@@ -1712,37 +1458,7 @@ async fn run_provision_container(
     mount_point: &Path,
     port: u16,
 ) -> Result<(), color_eyre::Report> {
-    fn validate_script_name(name: &str) -> Result<(), color_eyre::Report> {
-        if name.is_empty() {
-            return Err(color_eyre::eyre::eyre!("invalid profile name: empty"));
-        }
-        if name
-            .chars()
-            .any(|c| !(c.is_ascii_alphanumeric() || c == '-' || c == '_'))
-        {
-            return Err(color_eyre::eyre::eyre!(
-                "invalid profile name: unsupported characters"
-            ));
-        }
-        Ok(())
-    }
-
-    fn validate_engine_runtime(runtime: &str) -> Result<(), color_eyre::Report> {
-        if runtime.is_empty() {
-            return Err(color_eyre::eyre::eyre!("invalid runtime: empty"));
-        }
-        if runtime
-            .chars()
-            .any(|c| !(c.is_ascii_alphanumeric() || c == '-' || c == '_'))
-        {
-            return Err(color_eyre::eyre::eyre!(
-                "invalid runtime: unsupported characters"
-            ));
-        }
-        Ok(())
-    }
-
-    validate_script_name(script_name)?;
+    types::validate_script_name(script_name)?;
     validate_engine_runtime(engine_runtime)?;
 
     let home = std::env::var("HOME")?;
@@ -1762,30 +1478,7 @@ async fn run_provision_container(
         .to_str()
         .ok_or_else(|| color_eyre::eyre::eyre!("workspace mount path contains invalid UTF-8"))?;
 
-    fn validate_env_value(value: &str, field: &str) -> Result<(), color_eyre::Report> {
-        if value.contains('\0') || value.contains('\n') || value.contains('\r') {
-            return Err(color_eyre::eyre::eyre!(
-                "invalid value for {}: contains control characters",
-                field
-            ));
-        }
-        Ok(())
-    }
-
-    fn validate_model_name(name: &str) -> Result<(), color_eyre::Report> {
-        if name.is_empty() {
-            return Err(color_eyre::eyre::eyre!("invalid model name: empty"));
-        }
-        if name
-            .chars()
-            .any(|c| !(c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | ':' | '/')))
-        {
-            return Err(color_eyre::eyre::eyre!(
-                "invalid model name: unsupported characters"
-            ));
-        }
-        Ok(())
-    }
+    types::validate_model_name(model_name)?;
 
     ui::log_info(&format!("provisioning: {}", script_name));
     let runtime_envs = runtime_env_contract(id, port, engine_runtime, model_name).await?;
@@ -1826,25 +1519,39 @@ async fn run_provision_container(
         .parent()
         .ok_or_else(|| color_eyre::eyre::eyre!("invalid provision script path"))?
         .join("lib");
-    if !host_lib_dir.is_dir() {
-        return Err(color_eyre::eyre::eyre!(
-            "provision library directory not found: {:?}",
+    let has_lib = host_lib_dir.is_dir();
+    if !has_lib {
+        crate::ui::log_warn(&format!(
+            "provision library directory not found at {:?}; the provision script may fail if it \
+             sources files from lib/ (run `tnk init --force` to install provision assets)",
             host_lib_dir
         ));
     }
 
-    let specs_rev =
-        crate::sandbox::shared::compute_specs_revision_hash(&host_script, &host_lib_dir).await?;
+    let specs_rev = crate::sandbox::shared::compute_specs_revision_hash(
+        &host_script,
+        has_lib.then_some(&host_lib_dir),
+    )
+    .await?;
     let guest_provision_dir = format!("/tmp/tnk-provision-{}", script_name);
-    let guest_lib_dir = format!("{}/lib", guest_provision_dir);
     let guest_script_path = format!("{}/{}.sh", guest_provision_dir, script_name);
 
-    let mkdir_status = Command::new("container")
-        .args(["exec", id, "mkdir", "-p", &guest_lib_dir])
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .status()
-        .await?;
+    let mkdir_status = if has_lib {
+        let guest_lib_dir = format!("{}/lib", guest_provision_dir);
+        Command::new("container")
+            .args(["exec", id, "mkdir", "-p", &guest_lib_dir])
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .status()
+            .await?
+    } else {
+        std::process::Command::new("true")
+            .status()
+            .unwrap_or_else(|e| {
+                eprintln!("warning: failed to create provision dir: {}", e);
+                std::process::ExitStatus::default()
+            })
+    };
     if !mkdir_status.success() {
         return Err(color_eyre::eyre::eyre!(
             "failed to prepare guest provision directory"
@@ -1869,22 +1576,25 @@ async fn run_provision_container(
         ));
     }
 
-    let copy_lib_status = Command::new("container")
-        .args([
-            "copy",
-            host_lib_dir.to_str().ok_or_else(|| {
-                color_eyre::eyre::eyre!("provision lib path contains invalid UTF-8")
-            })?,
-            &format!("{}:{}", id, guest_lib_dir),
-        ])
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .status()
-        .await?;
-    if !copy_lib_status.success() {
-        return Err(color_eyre::eyre::eyre!(
-            "failed to copy provision library into container"
-        ));
+    if has_lib {
+        let guest_lib_dir = format!("{}/lib", guest_provision_dir);
+        let copy_lib_status = Command::new("container")
+            .args([
+                "copy",
+                host_lib_dir.to_str().ok_or_else(|| {
+                    color_eyre::eyre::eyre!("provision lib path contains invalid UTF-8")
+                })?,
+                &format!("{}:{}", id, guest_lib_dir),
+            ])
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .status()
+            .await?;
+        if !copy_lib_status.success() {
+            return Err(color_eyre::eyre::eyre!(
+                "failed to copy provision library into container"
+            ));
+        }
     }
 
     let mut child = Command::new("container")
@@ -1953,7 +1663,7 @@ async fn ensure_container_runtime_baseline(id: &str) -> Result<(), color_eyre::R
         .args([
             "exec", id,
             "sh", "-lc",
-            "apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq bash curl ca-certificates sudo git nodejs npm && if ! id -u tnk >/dev/null 2>&1; then useradd -m -s /bin/bash tnk; fi && usermod -aG sudo tnk && install -d -m 755 /etc/sudoers.d && printf 'tnk ALL=(ALL) NOPASSWD:ALL\\n' >/etc/sudoers.d/tnk && chmod 0440 /etc/sudoers.d/tnk",
+            "apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends bash curl ca-certificates sudo git nodejs npm && if ! id -u tnk >/dev/null 2>&1; then useradd -m -s /bin/bash tnk; fi && usermod -aG sudo tnk && install -d -m 755 /etc/sudoers.d && printf 'tnk ALL=(ALL) NOPASSWD:ALL\\n' >/etc/sudoers.d/tnk && chmod 0440 /etc/sudoers.d/tnk",
         ])
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
@@ -2004,30 +1714,6 @@ async fn stop_container() -> Result<(), color_eyre::Report> {
     Ok(())
 }
 
-pub async fn stop_container_with_timeout(
-    id: &str,
-    timeout_secs: u64,
-) -> Result<bool, color_eyre::Report> {
-    if !container_is_running(id).await {
-        return Ok(false);
-    }
-
-    let status = quiet_cmd("container")
-        .args(["stop", "--time", &timeout_secs.to_string(), id])
-        .status()
-        .await?;
-    if !status.success() {
-        return Err(color_eyre::eyre::eyre!("failed to stop container '{}'", id));
-    }
-
-    Ok(true)
-}
-
-pub async fn stop_container_by_name(id: &str) -> Result<(), color_eyre::Report> {
-    let _ = stop_container_with_timeout(id, 30).await?;
-    Ok(())
-}
-
 async fn delete_container(id: &str, force: bool) -> Result<(), color_eyre::Report> {
     let _lock =
         lifecycle::acquire("container-lifecycle", std::time::Duration::from_secs(20)).await?;
@@ -2036,8 +1722,9 @@ async fn delete_container(id: &str, force: bool) -> Result<(), color_eyre::Repor
 
 async fn delete_container_impl(id: &str, force: bool) -> Result<(), color_eyre::Report> {
     if !force && !std::io::stdout().is_terminal() {
-        eprintln!("error: terminal required for deletion, use --force to skip");
-        std::process::exit(77);
+        return Err(color_eyre::eyre::eyre!(
+            "terminal required for deletion, use --yes"
+        ));
     }
 
     if !container_exists(id).await {
@@ -2073,7 +1760,7 @@ async fn delete_container_impl(id: &str, force: bool) -> Result<(), color_eyre::
 }
 
 async fn list_containers() -> Result<Vec<SandboxEntry>, color_eyre::Report> {
-    let Some(items) = container_list_all().await else {
+    let Some(items) = container_utils::container_list_all().await else {
         return Err(color_eyre::eyre::eyre!(
             "failed to list containers (run 'container system start' if the service is not running)"
         ));
@@ -2082,13 +1769,13 @@ async fn list_containers() -> Result<Vec<SandboxEntry>, color_eyre::Report> {
     let entries: Vec<SandboxEntry> = items
         .iter()
         .filter_map(|item| {
-            let id = container_id_from_item(item)?;
+            let id = item.id()?;
             if !id.starts_with("tnk-") || id == "tnk-services" || id == "tnk-searxng" {
                 return None;
             }
-            let status = container_status_from_item(item).unwrap_or_else(|| "unknown".to_string());
+            let status = item.status_state().unwrap_or("unknown").to_string();
             Some(SandboxEntry {
-                id: id.clone(),
+                id: id.to_owned(),
                 status,
                 mount: "/workspace".to_string(),
             })
@@ -2111,12 +1798,14 @@ pub async fn build_golden_image_impl(profile_name: String) -> Result<(), color_e
     let builder_id = format!("tnk-builder-{}", sanitized);
     let image_tag = golden_image_tag(&profile_name);
 
-    let cfg = config::load()?;
+    let cfg = config::load().await?;
     let server_port = cfg.server_port.unwrap_or(8080);
     let engine_name = cfg.default_engine_runtime.as_deref().unwrap_or("llama");
-    let model_name = cfg
-        .default_engine_preset
-        .unwrap_or_else(|| crate::engine::default_model_for_runtime(engine_name).to_string());
+    let model_name = cfg.default_engine_preset.unwrap_or_else(|| {
+        crate::engine::default_model_for_runtime(engine_name)
+            .unwrap_or("llama")
+            .to_string()
+    });
     let ctx_window = 131072_u32;
 
     let mut settings = container_profile_settings(&profile_name, Path::new("/tmp")).await?;
@@ -2253,14 +1942,6 @@ pub async fn sandbox_is_running(id: &str) -> bool {
 
 pub async fn cleanup_untracked_vms(verbose: bool) -> Result<(), color_eyre::Report> {
     ContainerBackend::cleanup_untracked(verbose).await
-}
-
-pub async fn protect_vm(_vm_name: &str) -> Result<(), color_eyre::Report> {
-    Ok(())
-}
-
-pub async fn unprotect_vm(_vm_name: &str) -> Result<(), color_eyre::Report> {
-    Ok(())
 }
 
 pub async fn delete_sandbox(id: &str, force: bool) -> Result<(), color_eyre::Report> {

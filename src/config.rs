@@ -18,18 +18,18 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 
-type ResolvedConfig = (
-    u16,
-    String,
-    String,
-    String,
-    Option<String>,
-    Option<String>,
-    Option<String>,
-    Option<String>,
-    Option<String>,
-    bool,
-);
+pub struct ResolvedConfig {
+    pub server_port: u16,
+    pub workspace_root: String,
+    pub model_dir: String,
+    pub provision_profile: String,
+    pub engine_runtime: Option<String>,
+    pub engine_preset: Option<String>,
+    pub engine_bind_host: Option<String>,
+    pub sandbox_runtime: Option<String>,
+    pub container_host_gateway: Option<String>,
+    pub services_auto_start: bool,
+}
 
 #[derive(Subcommand)]
 pub enum ConfigCommands {
@@ -61,11 +61,11 @@ impl TnkConfig {
             .map(|p| p.to_string_lossy().to_string())
             .ok_or_else(|| color_eyre::eyre::eyre!("could not resolve home directory"))?;
         let workspace_root = match self.workspace_root {
-            Some(v) => v,
+            Some(v) => expand_path(v, &home),
             None => format!("{}/src", home),
         };
         let model_dir = match self.model_dir {
-            Some(v) => v,
+            Some(v) => expand_path(v, &home),
             None => format!("{}/opt/models", home),
         };
         let provision_profile = self
@@ -77,7 +77,7 @@ impl TnkConfig {
         let sandbox_runtime = self.default_sandbox_runtime.clone();
         let container_host_gateway = self.container_host_gateway.clone();
         let services_auto_start = self.services_auto_start.unwrap_or(true);
-        Ok((
+        Ok(ResolvedConfig {
             server_port,
             workspace_root,
             model_dir,
@@ -88,69 +88,88 @@ impl TnkConfig {
             sandbox_runtime,
             container_host_gateway,
             services_auto_start,
-        ))
+        })
     }
 
     pub fn print_resolved(&self) {
-        let (
-            server_port,
-            workspace_root,
-            model_dir,
-            provision_profile,
-            engine_runtime,
-            engine_preset,
-            engine_bind_host,
-            sandbox_runtime,
-            container_host_gateway,
-            services_auto_start,
-        ) = match self.clone().resolve() {
+        let cfg = match self.clone().resolve() {
             Ok(v) => v,
             Err(err) => {
                 eprintln!("error: {}", err);
                 return;
             }
         };
-        println!("server_port        {}", server_port);
-        println!("workspace_root    {}", workspace_root);
-        println!("model_dir         {}", model_dir);
-        println!("provision_profile {}", provision_profile);
+        println!("server_port       {}", cfg.server_port);
+        println!("workspace_root    {}", cfg.workspace_root);
+        println!("model_dir         {}", cfg.model_dir);
+        println!("provision_profile {}", cfg.provision_profile);
         println!(
             "engine_runtime    {}",
-            engine_runtime.as_deref().unwrap_or("llama")
+            cfg.engine_runtime.as_deref().unwrap_or("llama")
         );
         println!(
             "engine_preset     {}",
-            engine_preset.as_deref().unwrap_or("<none>")
+            cfg.engine_preset.as_deref().unwrap_or("<none>")
         );
         println!(
             "engine_bind_host  {}",
-            engine_bind_host.as_deref().unwrap_or("127.0.0.1")
+            cfg.engine_bind_host.as_deref().unwrap_or("127.0.0.1")
         );
         println!(
             "sandbox_runtime   {}",
-            sandbox_runtime.as_deref().unwrap_or("lima")
+            cfg.sandbox_runtime.as_deref().unwrap_or("lima")
         );
         println!(
-            "container_gateway   {}",
-            container_host_gateway.unwrap_or_else(|| "<auto>".to_string())
+            "container_gateway {}",
+            cfg.container_host_gateway
+                .unwrap_or_else(|| "<auto>".to_string())
         );
-        println!("services_auto_start  {}", services_auto_start);
+        println!("services_auto_start  {}", cfg.services_auto_start);
     }
 }
 
-pub fn load() -> Result<TnkConfig, color_eyre::Report> {
-    let home = std::env::var("HOME")?;
-    let config_path = PathBuf::from(&home).join(".config/tnk/tnk.toml");
-
-    let mut config = if config_path.exists() {
-        let content = fs::read_to_string(&config_path)?;
-        toml::from_str(&content)?
+/// Expand path prefixes supported by this function:
+/// - `~/` and `~` — resolved to `$HOME`
+/// - `$HOME` — resolved to `$HOME` (with or without trailing slash)
+/// - `${HOME}/` — resolved to `$HOME`
+///
+/// Note: only `$HOME` is expanded; other env vars like `$USER`, `$WORKSPACE`,
+/// etc. are not substituted.
+fn expand_path(path: String, home: &str) -> String {
+    if let Some(stripped) = path.strip_prefix("~/") {
+        format!("{}/{}", home, stripped)
+    } else if let Some(stripped) = path.strip_prefix('~') {
+        format!("{}{}", home, stripped)
+    } else if let Some(rest) = path.strip_prefix("$HOME") {
+        format!("{}{}", home, rest)
+    } else if let Some(rest) = path.strip_prefix("${HOME}") {
+        if rest.starts_with('/') {
+            format!("{}{}", home, rest)
+        } else {
+            path
+        }
     } else {
-        TnkConfig::default()
-    };
+        path
+    }
+}
 
+impl ResolvedConfig {
+    pub fn resolve(cfg: &TnkConfig) -> Result<Self, color_eyre::Report> {
+        cfg.clone().resolve()
+    }
+}
+
+fn apply_env_overrides(config: &mut TnkConfig) {
     if let Ok(v) = std::env::var("TNK_SERVER_PORT") {
-        config.server_port = v.parse().ok();
+        match v.parse() {
+            Ok(port) => config.server_port = Some(port),
+            Err(_) => {
+                crate::ui::log_warn(&format!(
+                    "invalid TNK_SERVER_PORT='{}'; ignoring env override",
+                    v
+                ));
+            }
+        }
     }
     if let Ok(v) = std::env::var("TNK_WORKSPACE_ROOT") {
         config.workspace_root = Some(v);
@@ -177,9 +196,46 @@ pub fn load() -> Result<TnkConfig, color_eyre::Report> {
         config.container_host_gateway = Some(v);
     }
     if let Ok(v) = std::env::var("TNK_SERVICES_AUTO_START") {
-        config.services_auto_start = Some(matches!(v.as_str(), "true" | "1"));
+        match v.as_str() {
+            "true" | "1" => config.services_auto_start = Some(true),
+            "false" | "0" => config.services_auto_start = Some(false),
+            _ => {
+                crate::ui::log_warn(&format!(
+                    "invalid TNK_SERVICES_AUTO_START='{}'; ignoring env override",
+                    v
+                ));
+            }
+        }
     }
+}
 
+pub async fn load() -> Result<TnkConfig, color_eyre::Report> {
+    let home = std::env::var("HOME")?;
+    let config_path = PathBuf::from(&home).join(".config/tnk/tnk.toml");
+
+    let mut config = if config_path.exists() {
+        let content = tokio::fs::read_to_string(&config_path).await?;
+        toml::from_str(&content)?
+    } else {
+        TnkConfig::default()
+    };
+
+    apply_env_overrides(&mut config);
+    Ok(config)
+}
+
+pub fn load_blocking() -> Result<TnkConfig, color_eyre::Report> {
+    let home = std::env::var("HOME")?;
+    let config_path = PathBuf::from(&home).join(".config/tnk/tnk.toml");
+
+    let mut config = if config_path.exists() {
+        let content = fs::read_to_string(&config_path)?;
+        toml::from_str(&content)?
+    } else {
+        TnkConfig::default()
+    };
+
+    apply_env_overrides(&mut config);
     Ok(config)
 }
 
@@ -195,16 +251,17 @@ pub fn init_config(force: bool) -> Result<(), color_eyre::Report> {
     fs::create_dir_all(&config_dir)?;
     fs::set_permissions(&config_dir, fs::Permissions::from_mode(0o700))?;
 
-    let template = r##"# tnk configuration
+    let template = format!(
+        r##"# tnk configuration
 
 # API port for local inference server
 server_port = 8080
 
 # Root used for project-to-sandbox mapping (must NOT be your home directory)
-workspace_root = "~/src"
+workspace_root = "{home}/src"
 
 # Base directory for local model files
-model_dir = "~/opt/models"
+model_dir = "{home}/opt/models"
 
 # Default sandbox profile
 default_provision_profile = "pi"
@@ -226,7 +283,8 @@ default_engine_bind_host = "127.0.0.1"
 # Example: "llama-default" loads ~/.config/tnk/provider.d/llama-default.ini
 # default_engine_preset = "llama-default"
 
-"##;
+"##
+    );
 
     fs::write(&config_path, template)?;
     fs::set_permissions(&config_path, fs::Permissions::from_mode(0o600))?;
@@ -236,34 +294,23 @@ default_engine_bind_host = "127.0.0.1"
 
 #[cfg(test)]
 mod tests {
-    use super::TnkConfig;
+    use super::{ResolvedConfig, TnkConfig, expand_path};
 
     #[test]
     fn resolve_uses_expected_defaults() {
         let cfg = TnkConfig::default();
-        let (
-            port,
-            workspace_root,
-            model_dir,
-            profile,
-            runtime,
-            preset,
-            bind_host,
-            sandbox_runtime,
-            gateway,
-            services_auto_start,
-        ) = cfg.resolve().expect("resolve defaults");
+        let cfg = ResolvedConfig::resolve(&cfg).expect("resolve defaults");
 
-        assert_eq!(port, 8080);
-        assert!(workspace_root.ends_with("/src"));
-        assert!(model_dir.ends_with("/opt/models"));
-        assert_eq!(profile, "pi");
-        assert!(runtime.is_none());
-        assert!(preset.is_none());
-        assert!(bind_host.is_none());
-        assert!(sandbox_runtime.is_none());
-        assert!(gateway.is_none());
-        assert!(services_auto_start);
+        assert_eq!(cfg.server_port, 8080);
+        assert!(cfg.workspace_root.ends_with("/src"));
+        assert!(cfg.model_dir.ends_with("/opt/models"));
+        assert_eq!(cfg.provision_profile, "pi");
+        assert!(cfg.engine_runtime.is_none());
+        assert!(cfg.engine_preset.is_none());
+        assert!(cfg.engine_bind_host.is_none());
+        assert!(cfg.sandbox_runtime.is_none());
+        assert!(cfg.container_host_gateway.is_none());
+        assert!(cfg.services_auto_start);
     }
 
     #[test]
@@ -281,28 +328,39 @@ mod tests {
             services_auto_start: Some(false),
         };
 
-        let (
-            port,
-            workspace_root,
-            model_dir,
-            profile,
-            runtime,
-            preset,
-            bind_host,
-            sandbox_runtime,
-            gateway,
-            services_auto_start,
-        ) = cfg.resolve().expect("resolve explicit values");
+        let cfg = ResolvedConfig::resolve(&cfg).expect("resolve explicit values");
 
-        assert_eq!(port, 9001);
-        assert_eq!(workspace_root, "/tmp/ws");
-        assert_eq!(model_dir, "/tmp/models");
-        assert_eq!(profile, "base");
-        assert_eq!(runtime.as_deref(), Some("llama"));
-        assert_eq!(preset.as_deref(), Some("llama-default"));
-        assert_eq!(bind_host.as_deref(), Some("127.0.0.1"));
-        assert_eq!(sandbox_runtime.as_deref(), Some("container"));
-        assert_eq!(gateway.as_deref(), Some("10.0.0.1"));
-        assert!(!services_auto_start);
+        assert_eq!(cfg.server_port, 9001);
+        assert_eq!(cfg.workspace_root, "/tmp/ws");
+        assert_eq!(cfg.model_dir, "/tmp/models");
+        assert_eq!(cfg.provision_profile, "base");
+        assert_eq!(cfg.engine_runtime.as_deref(), Some("llama"));
+        assert_eq!(cfg.engine_preset.as_deref(), Some("llama-default"));
+        assert_eq!(cfg.engine_bind_host.as_deref(), Some("127.0.0.1"));
+        assert_eq!(cfg.sandbox_runtime.as_deref(), Some("container"));
+        assert_eq!(cfg.container_host_gateway.as_deref(), Some("10.0.0.1"));
+        assert!(!cfg.services_auto_start);
+    }
+
+    #[test]
+    fn expand_path_replaces_tilde() {
+        assert_eq!(
+            expand_path("~/src".to_string(), "/home/user"),
+            "/home/user/src"
+        );
+        assert_eq!(
+            expand_path("~/opt/models".to_string(), "/home/user"),
+            "/home/user/opt/models"
+        );
+    }
+
+    #[test]
+    fn expand_path_preserves_absolute() {
+        assert_eq!(expand_path("/tmp/ws".to_string(), "/home/user"), "/tmp/ws");
+    }
+
+    #[test]
+    fn expand_path_preserves_relative() {
+        assert_eq!(expand_path("./src".to_string(), "/home/user"), "./src");
     }
 }

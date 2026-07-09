@@ -103,8 +103,6 @@ enum Commands {
             help = "Timeout per component in seconds (default: 30)"
         )]
         timeout: Option<u64>,
-        #[arg(short, long, help = "Skip confirmation prompts")]
-        yes: bool,
         #[arg(short = 'n', long, help = "Preview actions without side effects")]
         dry_run: bool,
     },
@@ -237,6 +235,8 @@ pub enum EngineCommands {
         runtime: Option<String>,
         #[arg(short, long, value_enum, default_value_t = OutputFormat::Text)]
         output: OutputFormat,
+        #[arg(long, help = "Only show presets with an explicit runtime field")]
+        strict: bool,
     },
 }
 
@@ -297,9 +297,7 @@ pub enum SandboxCommands {
     },
     #[command(about = "Delete active sandbox")]
     Delete {
-        #[arg(long, help = "Skip confirmation prompt")]
-        force: bool,
-        #[arg(short, long, help = "Skip confirmation prompts")]
+        #[arg(short, long, help = "Skip confirmation prompt")]
         yes: bool,
         #[arg(short = 'n', long, help = "Preview actions without side effects")]
         dry_run: bool,
@@ -326,12 +324,13 @@ async fn main() -> color_eyre::Result<()> {
 async fn boot(preset: Option<String>, runtime: Option<String>) -> Result<(), color_eyre::Report> {
     sandbox::cleanup_untracked_vms(crate::ui::is_verbose()).await?;
 
-    let cfg = config::load()?;
+    let cfg = config::load().await?;
     let engine_name = engine::resolve_runtime_for_profile(
         runtime,
         cfg.default_engine_runtime.clone(),
         preset.as_deref(),
-    )?;
+    )
+    .await?;
     let server_port = cfg.server_port.unwrap_or(8080);
 
     if engine::is_running().await {
@@ -349,9 +348,8 @@ async fn boot(preset: Option<String>, runtime: Option<String>) -> Result<(), col
         if !crate::ui::is_quiet() {
             eprintln!("starting services...");
         }
-        if let Err(e) = services::start(false, None).await {
-            eprintln!("error: services failed to start: {e}");
-        } else if !crate::ui::is_quiet() {
+        services::start(false, None).await?;
+        if !crate::ui::is_quiet() {
             eprintln!("services ready");
         }
     }
@@ -359,12 +357,12 @@ async fn boot(preset: Option<String>, runtime: Option<String>) -> Result<(), col
     Ok(())
 }
 
-fn resolve_runtime(
+async fn resolve_runtime(
     runtime_flag: Option<String>,
     default_engine_runtime: Option<String>,
     preset: Option<&str>,
 ) -> Result<String, color_eyre::Report> {
-    engine::resolve_runtime_for_profile(runtime_flag, default_engine_runtime, preset)
+    engine::resolve_runtime_for_profile(runtime_flag, default_engine_runtime, preset).await
 }
 
 async fn run() -> Result<(), color_eyre::Report> {
@@ -388,35 +386,40 @@ async fn run() -> Result<(), color_eyre::Report> {
                 engine_server_port,
                 foreground,
             } => {
-                let cfg = config::load()?;
+                let cfg = config::load().await?;
                 let engine_name = resolve_runtime(
                     runtime,
                     cfg.default_engine_runtime.clone(),
                     preset.as_deref(),
-                )?;
+                )
+                .await?;
                 let server_port = engine_server_port.unwrap_or(cfg.server_port.unwrap_or(8080));
                 engine::start(&engine_name, preset, server_port, bind_host, foreground).await?
             }
             EngineCommands::Status { output } => {
-                let cfg = config::load()?;
-                let _ = resolve_runtime(None, cfg.default_engine_runtime.clone(), None)?;
+                let cfg = config::load().await?;
+                let _ = resolve_runtime(None, cfg.default_engine_runtime.clone(), None).await?;
                 engine::status(output).await?
             }
             EngineCommands::Stop { runtime, all } => {
                 if all {
                     engine::stop_all().await?;
                 } else {
-                    let cfg = config::load()?;
+                    let cfg = config::load().await?;
                     let engine_name =
-                        resolve_runtime(runtime, cfg.default_engine_runtime.clone(), None)?;
+                        resolve_runtime(runtime, cfg.default_engine_runtime.clone(), None).await?;
                     engine::stop(&engine_name).await?;
                 }
             }
-            EngineCommands::Presets { runtime, output } => {
-                let cfg = config::load()?;
+            EngineCommands::Presets {
+                runtime,
+                output,
+                strict,
+            } => {
+                let cfg = config::load().await?;
                 let engine_name =
-                    resolve_runtime(runtime, cfg.default_engine_runtime.clone(), None)?;
-                engine::presets_for_runtime(&engine_name, output)?;
+                    resolve_runtime(runtime, cfg.default_engine_runtime.clone(), None).await?;
+                engine::presets_for_runtime(&engine_name, output, strict).await?
             }
         },
         Some(Commands::Sandbox { action }) => match action {
@@ -428,12 +431,12 @@ async fn run() -> Result<(), color_eyre::Report> {
             } => {
                 let home = std::env::var("HOME")?;
                 let config_dir = std::path::PathBuf::from(&home).join(".config/tnk");
-                let cfg = config::load()?;
+                let cfg = config::load().await?;
                 let default_profile = cfg
                     .default_provision_profile
                     .unwrap_or_else(|| "pi".to_string());
 
-                let profiles = catalog::list_profiles(&config_dir)?;
+                let profiles = catalog::list_profiles(&config_dir).await?;
                 let all_profiles: Vec<String> = std::iter::once("base".to_string())
                     .chain(profiles.iter().map(|p| p.name.clone()))
                     .collect();
@@ -480,8 +483,10 @@ async fn run() -> Result<(), color_eyre::Report> {
                         || !std::io::stdout().is_terminal()
                         || !std::io::stderr().is_terminal()
                     {
-                        eprintln!("error: --shell requires an interactive terminal");
-                        std::process::exit(64);
+                        ui::exit_with(
+                            ui::ExitCode::Usage,
+                            "--shell requires an interactive terminal",
+                        );
                     }
 
                     sandbox::shell(None, None, false, Vec::new(), audit_log, selected_runtime)
@@ -505,7 +510,6 @@ async fn run() -> Result<(), color_eyre::Report> {
                 sandbox::stop(name, all, runtime).await?
             }
             SandboxCommands::Delete {
-                force,
                 yes,
                 dry_run,
                 runtime,
@@ -516,10 +520,9 @@ async fn run() -> Result<(), color_eyre::Report> {
                 }
                 let (container_id, _, _) = sandbox::resolve_workspace_context()?;
                 if container_id.is_empty() || container_id == "tnk-config" {
-                    eprintln!("error: must be inside a project directory");
-                    std::process::exit(64);
+                    ui::exit_with(ui::ExitCode::Usage, "must be inside a project directory");
                 }
-                sandbox::delete_sandbox(&container_id, force || yes, runtime).await?
+                sandbox::delete_sandbox(&container_id, yes, runtime).await?
             }
             SandboxCommands::Ls {
                 output,
@@ -539,22 +542,34 @@ async fn run() -> Result<(), color_eyre::Report> {
             }
             boot(preset, runtime).await?
         }
-        Some(Commands::Shutdown {
-            timeout,
-            yes,
-            dry_run,
-        }) => {
-            shutdown::run(timeout, yes, dry_run).await?;
+        Some(Commands::Shutdown { timeout, dry_run }) => {
+            shutdown::run(timeout, dry_run).await?;
         }
         Some(Commands::Init { git_url, force }) => {
-            tokio::task::spawn_blocking(move || init::run(init::InitCommands { git_url, force }))
-                .await
-                .map_err(|e| color_eyre::eyre::eyre!("init task failed: {}", e))??
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(120),
+                tokio::task::spawn_blocking(move || {
+                    init::run(init::InitCommands { git_url, force })
+                }),
+            )
+            .await
+            {
+                Ok(Ok(Ok(()))) => {}
+                Ok(Ok(Err(err))) => return Err(err),
+                Ok(Err(join_err)) => {
+                    return Err(color_eyre::eyre::eyre!("init task panicked: {}", join_err));
+                }
+                Err(_) => {
+                    return Err(color_eyre::eyre::eyre!(
+                        "init timed out after 120s; check network connectivity"
+                    ));
+                }
+            }
         }
         Some(Commands::Config { action }) => match action {
             ConfigCommands::Init { force } => config::init_config(force)?,
             ConfigCommands::Show => {
-                let cfg = config::load()?;
+                let cfg = config::load().await?;
                 cfg.print_resolved();
             }
         },

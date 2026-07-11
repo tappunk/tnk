@@ -17,6 +17,8 @@
 
 ## Quick Start
 
+![tnk demo](https://raw.githubusercontent.com/tappunk/.github/refs/heads/main/assets/_sandbox-oc-pi.gif)
+
 ```bash
 brew install tappunk/tnk/tnk      # or: cargo install tnk
 tnk init                          # populate config from tnk-specs

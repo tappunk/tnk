@@ -1069,13 +1069,11 @@ async fn run_provision_lima(
 
     ui::log_info(&format!("provisioning: {}", script_name));
 
-    let guest_lib_dir = format!("{}/lib", guest_provision_dir);
-    let guest_target_lib_dir = format!("{}:{}", id, guest_lib_dir);
-    let mkdir_output = Command::new("limactl")
-        .args(["shell", id, "--", "mkdir", "-p", &guest_lib_dir])
+    let prepare_output = Command::new("limactl")
+        .args(["shell", id, "--", "mkdir", "-p", &guest_provision_dir])
         .output()
         .await?;
-    if !mkdir_output.status.success() {
+    if !prepare_output.status.success() {
         return Err(color_eyre::eyre::eyre!(
             "failed to prepare guest provision directory for '{}'",
             script_name
@@ -1095,31 +1093,46 @@ async fn run_provision_lima(
         ));
     }
 
-    let lib_copy_output = Command::new("limactl")
-        .args(["copy", "--recursive"])
-        .arg(&host_lib_dir)
-        .arg(&guest_target_lib_dir)
-        .output()
-        .await?;
-    if !lib_copy_output.status.success() {
-        crate::ui::log_warn(
-            "limactl copy --recursive failed for provision library, falling back to tar",
-        );
-        let tar_copy = Command::new("bash")
-            .arg("-c")
-            .arg(format!(
-                "cd {} && tar cf - . | limactl shell {} tar xf - -C {}",
-                host_lib_dir.display(),
-                id,
-                guest_target_lib_dir
-            ))
+    if has_lib {
+        let guest_lib_dir = format!("{}/lib", guest_provision_dir);
+        let guest_target_lib_dir = format!("{}:{}", id, guest_lib_dir);
+        let mkdir_output = Command::new("limactl")
+            .args(["shell", id, "--", "mkdir", "-p", &guest_lib_dir])
             .output()
             .await?;
-        if !tar_copy.status.success() {
+        if !mkdir_output.status.success() {
             return Err(color_eyre::eyre::eyre!(
-                "failed to copy provision library into lima guest for '{}' (both copy --recursive and tar fallback failed)",
+                "failed to prepare guest provision directory for '{}'",
                 script_name
             ));
+        }
+
+        let lib_copy_output = Command::new("limactl")
+            .args(["copy", "--recursive"])
+            .arg(&host_lib_dir)
+            .arg(&guest_target_lib_dir)
+            .output()
+            .await?;
+        if !lib_copy_output.status.success() {
+            crate::ui::log_warn(
+                "limactl copy --recursive failed for provision library, falling back to tar",
+            );
+            let tar_copy = Command::new("bash")
+                .arg("-c")
+                .arg(format!(
+                    "cd {} && tar cf - . | limactl shell {} tar xf - -C {}",
+                    host_lib_dir.display(),
+                    id,
+                    guest_target_lib_dir
+                ))
+                .output()
+                .await?;
+            if !tar_copy.status.success() {
+                return Err(color_eyre::eyre::eyre!(
+                    "failed to copy provision library into lima guest for '{}' (both copy --recursive and tar fallback failed)",
+                    script_name
+                ));
+            }
         }
     }
 

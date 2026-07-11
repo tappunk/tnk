@@ -15,7 +15,7 @@
 use std::path::{Path, PathBuf};
 use tokio::fs;
 
-const EXCLUDED_PROFILES: &[&str] = &["tnk-services"];
+const EXCLUDED_PROFILES: &[&str] = &["tnk-services", "provision-lib"];
 
 #[derive(Debug, Clone)]
 pub struct Profile {

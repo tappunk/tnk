@@ -56,7 +56,7 @@ const MLXCEL_SPEC: EngineRuntimeSpec = EngineRuntimeSpec {
     log_stdout: "mlxcel-server.log",
     log_stderr: "mlxcel-server-err.log",
     default_model_id: "mlx-community/Qwen3.6-35B-A3B-4bit",
-    default_bind_host: "0.0.0.0",
+    default_bind_host: "127.0.0.1",
 };
 
 const LLAMA_SPEC: EngineRuntimeSpec = EngineRuntimeSpec {
@@ -67,7 +67,7 @@ const LLAMA_SPEC: EngineRuntimeSpec = EngineRuntimeSpec {
     log_stdout: "llama-server.log",
     log_stderr: "llama-server-err.log",
     default_model_id: "unsloth/Qwen3.6-35B-A3B-GGUF/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf",
-    default_bind_host: "0.0.0.0",
+    default_bind_host: "127.0.0.1",
 };
 
 const VLLM_MLX_SPEC: EngineRuntimeSpec = EngineRuntimeSpec {
@@ -78,7 +78,7 @@ const VLLM_MLX_SPEC: EngineRuntimeSpec = EngineRuntimeSpec {
     log_stdout: "vllm-mlx.log",
     log_stderr: "vllm-mlx-err.log",
     default_model_id: "mlx-community/Qwen3.6-35B-A3B-4bit",
-    default_bind_host: "0.0.0.0",
+    default_bind_host: "127.0.0.1",
 };
 
 const SUPPORTED_RUNTIMES: [EngineRuntimeSpec; 3] = [LLAMA_SPEC, MLXCEL_SPEC, VLLM_MLX_SPEC];

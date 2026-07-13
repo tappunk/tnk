@@ -210,6 +210,7 @@ pub async fn load() -> Result<TnkConfig, color_eyre::Report> {
         let content = tokio::fs::read_to_string(&config_path).await?;
         toml::from_str(&content)?
     } else {
+        crate::ui::log_info("using default settings (run `tnk init` to configure)");
         TnkConfig::default()
     };
 
@@ -225,6 +226,7 @@ pub fn load_blocking() -> Result<TnkConfig, color_eyre::Report> {
         let content = fs::read_to_string(&config_path)?;
         toml::from_str(&content)?
     } else {
+        crate::ui::log_info("using default settings (run `tnk init` to configure)");
         TnkConfig::default()
     };
 

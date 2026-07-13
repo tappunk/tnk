@@ -125,10 +125,11 @@ pub async fn resolve_runtime_for_profile(
         }
 
         return Err(color_eyre::eyre::eyre!(
-            "preset '{}' declares unsupported runtime '{}' (supported: {})",
+            "preset '{}' requires runtime '{}' which is not supported; \
+             use --runtime <runtime> or install {}",
             profile_name,
             runtime,
-            supported_runtime_names().join(", ")
+            runtime
         ));
     }
 

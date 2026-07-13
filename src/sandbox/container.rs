@@ -25,7 +25,7 @@ use super::{ProfileSettings, SandboxBackend, SandboxEntry, types};
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
@@ -1656,16 +1656,22 @@ async fn ensure_container_runtime_baseline(id: &str) -> Result<(), color_eyre::R
         return Ok(());
     }
 
-    let install_status = Command::new("container")
-        .args([
-            "exec", id,
-            "sh", "-lc",
-            "apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends bash curl ca-certificates sudo git nodejs npm && if ! id -u tnk >/dev/null 2>&1; then useradd -m -s /bin/bash tnk; fi && usermod -aG sudo tnk && install -d -m 755 /etc/sudoers.d && printf 'tnk ALL=(ALL) NOPASSWD:ALL\\n' >/etc/sudoers.d/tnk && chmod 0440 /etc/sudoers.d/tnk",
-        ])
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .status()
-        .await?;
+    let install_status = tokio::time::timeout(
+        Duration::from_secs(300),
+        Command::new("container")
+            .args([
+                "exec", id,
+                "sh", "-lc",
+                "apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends bash curl ca-certificates sudo git nodejs npm && if ! id -u tnk >/dev/null 2>&1; then useradd -m -s /bin/bash tnk; fi && usermod -aG sudo tnk && install -d -m 755 /etc/sudoers.d && printf 'tnk ALL=(ALL) NOPASSWD:ALL\\n' >/etc/sudoers.d/tnk && chmod 0440 /etc/sudoers.d/tnk",
+            ])
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .status(),
+    )
+    .await
+    .map_err(|_| {
+        color_eyre::eyre::eyre!("container baseline install timed out after 300s")
+    })??;
     if !install_status.success() {
         return Err(color_eyre::eyre::eyre!(
             "failed to install container baseline dependencies"

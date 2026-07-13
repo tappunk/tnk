@@ -263,71 +263,73 @@ async fn start_container(dry_run: bool) -> Result<(), color_eyre::Report> {
         let searxng_url = format!("http://{}:18766", host_gateway);
 
         let home = home.clone();
-        let provision_result: Result<(), color_eyre::Report> = spawn_blocking(move || {
-            let provision_script = PathBuf::from(&home)
-                .join(".config/tnk/sandbox.d/container/provision.d/tnk-services.sh");
-            if !provision_script.is_file() {
-                return Err(color_eyre::eyre::eyre!(
-                    "services provision script not found at {}; run `tnk init --force`",
-                    provision_script.display()
-                ));
-            }
-
-            let provision_lib =
-                PathBuf::from(&home).join(".config/tnk/sandbox.d/container/provision.d/lib");
-
-            let mut cp_cmd = std::process::Command::new("container");
-            cp_cmd.args([
-                "copy",
-                provision_script.to_str().ok_or_else(|| {
-                    color_eyre::eyre::eyre!("provision script path contains invalid UTF-8")
-                })?,
-                &format!("{}:/tmp/tnk-services.sh", container_id),
-            ]);
-            if !cp_cmd.status()?.success() {
-                return Err(color_eyre::eyre::eyre!(
-                    "failed to copy provision script into services container"
-                ));
-            }
-
-            if provision_lib.is_dir() {
-                let mut cp_lib_cmd = std::process::Command::new("container");
-                cp_lib_cmd.args([
-                    "copy",
-                    provision_lib.to_str().ok_or_else(|| {
-                        color_eyre::eyre::eyre!("provision lib path contains invalid UTF-8")
-                    })?,
-                    &format!("{}:/tmp", container_id),
-                ]);
-                if !cp_lib_cmd.status()?.success() {
+        let provision_result: Result<(), color_eyre::Report> =
+            tokio::time::timeout(Duration::from_secs(600), spawn_blocking(move || {
+                let provision_script = PathBuf::from(&home)
+                    .join(".config/tnk/sandbox.d/container/provision.d/tnk-services.sh");
+                if !provision_script.is_file() {
                     return Err(color_eyre::eyre::eyre!(
-                        "failed to copy provision library into services container"
+                        "services provision script not found at {}; run `tnk init --force`",
+                        provision_script.display()
                     ));
                 }
-            }
 
-            let mut provision_cmd = std::process::Command::new("container");
-            provision_cmd.args([
-                "exec",
-                "--env",
-                &format!("TNK_SEARXNG_URL={}", searxng_url),
-                "--user",
-                "tnk",
-                container_id,
-                "bash",
-                "/tmp/tnk-services.sh",
-            ]);
-            if provision_cmd.status()?.success() {
-                crate::ui::log_info("tnk-services container provisioned");
-            } else {
-                return Err(color_eyre::eyre::eyre!(
-                    "tnk-services container provisioning failed"
-                ));
-            }
-            Ok(())
-        })
-        .await
-        .map_err(|e| color_eyre::eyre::eyre!("provision task error: {}", e))?;
+                let provision_lib =
+                    PathBuf::from(&home).join(".config/tnk/sandbox.d/container/provision.d/lib");
+
+                let mut cp_cmd = std::process::Command::new("container");
+                cp_cmd.args([
+                    "copy",
+                    provision_script.to_str().ok_or_else(|| {
+                        color_eyre::eyre::eyre!("provision script path contains invalid UTF-8")
+                    })?,
+                    &format!("{}:/tmp/tnk-services.sh", container_id),
+                ]);
+                if !cp_cmd.status()?.success() {
+                    return Err(color_eyre::eyre::eyre!(
+                        "failed to copy provision script into services container"
+                    ));
+                }
+
+                if provision_lib.is_dir() {
+                    let mut cp_lib_cmd = std::process::Command::new("container");
+                    cp_lib_cmd.args([
+                        "copy",
+                        provision_lib.to_str().ok_or_else(|| {
+                            color_eyre::eyre::eyre!("provision lib path contains invalid UTF-8")
+                        })?,
+                        &format!("{}:/tmp", container_id),
+                    ]);
+                    if !cp_lib_cmd.status()?.success() {
+                        return Err(color_eyre::eyre::eyre!(
+                            "failed to copy provision library into services container"
+                        ));
+                    }
+                }
+
+                let mut provision_cmd = std::process::Command::new("container");
+                provision_cmd.args([
+                    "exec",
+                    "--env",
+                    &format!("TNK_SEARXNG_URL={}", searxng_url),
+                    "--user",
+                    "tnk",
+                    container_id,
+                    "bash",
+                    "/tmp/tnk-services.sh",
+                ]);
+                if provision_cmd.status()?.success() {
+                    crate::ui::log_info("tnk-services container provisioned");
+                } else {
+                    return Err(color_eyre::eyre::eyre!(
+                        "tnk-services container provisioning failed"
+                    ));
+                }
+                Ok(())
+            }))
+            .await
+            .map_err(|_| color_eyre::eyre::eyre!("provision timed out after 600s"))?
+            .map_err(|e| color_eyre::eyre::eyre!("provision task error: {}", e))?;
         provision_result?;
     }
 
@@ -917,18 +919,24 @@ async fn ensure_services_runtime_baseline(container_id: &str) -> Result<(), colo
     }
 
     crate::ui::log_info("installing tnk-services runtime dependencies");
-    let deps_status = Command::new("container")
-        .args([
-            "exec",
-            container_id,
-            "sh",
-            "-lc",
-            "apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq bash ca-certificates curl nodejs npm sudo && if ! id -u tnk >/dev/null 2>&1; then useradd -m -s /bin/bash tnk; fi && usermod -aG sudo tnk && install -d -m 755 /etc/sudoers.d && printf 'tnk ALL=(ALL) NOPASSWD:ALL\\n' >/etc/sudoers.d/tnk && chmod 0440 /etc/sudoers.d/tnk && mkdir -p /home/tnk/.local && chown -R tnk:tnk /home/tnk",
-        ])
-        .stdout(std::process::Stdio::inherit())
-        .stderr(std::process::Stdio::inherit())
-        .status()
-        .await?;
+    let deps_status = tokio::time::timeout(
+        Duration::from_secs(300),
+        Command::new("container")
+            .args([
+                "exec",
+                container_id,
+                "sh",
+                "-lc",
+                "apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq bash ca-certificates curl nodejs npm sudo && if ! id -u tnk >/dev/null 2>&1; then useradd -m -s /bin/bash tnk; fi && usermod -aG sudo tnk && install -d -m 755 /etc/sudoers.d && printf 'tnk ALL=(ALL) NOPASSWD:ALL\\n' >/etc/sudoers.d/tnk && chmod 0440 /etc/sudoers.d/tnk && mkdir -p /home/tnk/.local && chown -R tnk:tnk /home/tnk",
+            ])
+            .stdout(std::process::Stdio::inherit())
+            .stderr(std::process::Stdio::inherit())
+            .status(),
+    )
+    .await
+    .map_err(|_| {
+        color_eyre::eyre::eyre!("dependency install timed out after 300s")
+    })??;
     if !deps_status.success() {
         return Err(color_eyre::eyre::eyre!(
             "failed to install tnk-services container dependencies"

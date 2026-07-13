@@ -851,7 +851,7 @@ async fn stop_lima_instance_by_id(id: &str) -> Result<(), color_eyre::Report> {
     }
 
     let graceful = tokio::time::timeout(
-        std::time::Duration::from_secs(20),
+        std::time::Duration::from_secs(60),
         Command::new("limactl").args(["stop", id]).output(),
     )
     .await;
@@ -861,7 +861,18 @@ async fn stop_lima_instance_by_id(id: &str) -> Result<(), color_eyre::Report> {
         Ok(Err(_)) | Err(_) => false,
     };
 
-    if !graceful_ok && instance_is_running(id).await? {
+    if graceful_ok || !instance_is_running(id).await? {
+        ui::log_info(&format!("stopped {}", id));
+        return Ok(());
+    }
+
+    eprintln!(
+        "warning: graceful stop for '{}' did not succeed, retrying",
+        id
+    );
+    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+
+    if instance_is_running(id).await? {
         let force = tokio::time::timeout(
             std::time::Duration::from_secs(20),
             Command::new("limactl")

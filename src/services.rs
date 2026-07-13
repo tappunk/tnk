@@ -752,11 +752,29 @@ async fn stop_lima(dry_run: bool) -> Result<(), color_eyre::Report> {
     if !lima_instance_exists("tnk-services").await {
         return Ok(());
     }
-    limactl_run_or_err(
-        &["stop", "--force", "tnk-services"],
-        "failed to stop services instance",
+    let id = "tnk-services";
+    let graceful = tokio::time::timeout(
+        Duration::from_secs(60),
+        limactl_output(&["stop", id]),
     )
-    .await?;
+    .await;
+
+    let graceful_ok = match graceful {
+        Ok(Ok(output)) => output.status.success(),
+        Ok(Err(_)) | Err(_) => false,
+    };
+
+    if !graceful_ok && lima_instance_running(id).await {
+        eprintln!(
+            "warning: graceful stop for '{}' did not succeed, escalating to force stop",
+            id
+        );
+        limactl_run_or_err(
+            &["stop", "--force", id],
+            "failed to stop services instance",
+        )
+        .await?;
+    }
     Ok(())
 }
 

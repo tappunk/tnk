@@ -1136,12 +1136,16 @@ async fn run_provision_lima(
         }
     }
 
+    let openai_url = shell_escape(&format!("http://{}:{}/v1", host_gateway, port));
+    let mcp_bridge_url = shell_escape(&format!("http://{}:18765", host_gateway));
+    let searxng_url = shell_escape(&format!("http://{}:18766", host_gateway));
+    let host_gateway_escaped = shell_escape(&host_gateway);
     let provision_cmd = format!(
         r#"set -eu -o pipefail
-export TNK_OPENAI_URL=http://{}:{}/v1
-export TNK_INFERENCE_URL=http://{}:{}/v1
-export TNK_MCP_BRIDGE_URL=http://{}:18765
-export TNK_SEARXNG_URL=http://{}:18766
+export TNK_OPENAI_URL={}
+export TNK_INFERENCE_URL={}
+export TNK_MCP_BRIDGE_URL={}
+export TNK_SEARXNG_URL={}
 export TNK_MODEL_NAME={}
 export TNK_CTX_WINDOW={}
 export TNK_WORKSPACE_MOUNT={}
@@ -1149,17 +1153,15 @@ export TNK_SPECS_REV={}
 export TNK_CONTAINER_HOST_GATEWAY={}
 export TNK_ENGINE_RUNTIME={}
 bash {}"#,
-        host_gateway,
-        port,
-        host_gateway,
-        port,
-        host_gateway,
-        host_gateway,
+        openai_url,
+        openai_url,
+        mcp_bridge_url,
+        searxng_url,
         shell_escape(model_name),
         ctx_window,
         shell_escape(mount_path),
         shell_escape(&specs_rev),
-        shell_escape(&host_gateway),
+        host_gateway_escaped,
         shell_escape(engine_runtime),
         shell_escape(&guest_script_path),
     );

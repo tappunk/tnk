@@ -562,7 +562,7 @@ impl SandboxBackend for ContainerBackend {
                 "tty": use_tty && requires_tty,
                 "requires_tty": requires_tty,
                 "runtime_env": crate::sandbox::shared::runtime_env_summary(runtime_envs),
-            }))?;
+            })).await?;
             logger.write_event(serde_json::json!({
                 "event": "exec_invocation",
                 "ts": crate::sandbox::shared::now_unix_seconds(),
@@ -570,7 +570,7 @@ impl SandboxBackend for ContainerBackend {
                 "argv": args,
                 "tty": use_tty && requires_tty,
                 "runtime_env": crate::sandbox::shared::runtime_env_summary(runtime_envs),
-            }))?;
+            })).await?;
         }
         let mut child_cmd = Command::new("container");
         child_cmd.args(&args);
@@ -633,7 +633,7 @@ impl SandboxBackend for ContainerBackend {
                 "ts": crate::sandbox::shared::now_unix_seconds(),
                 "container_id": id,
                 "exit_code": status.code(),
-            }))?;
+            })).await?;
         }
 
         if let Some(task) = resize_task {
@@ -1139,7 +1139,7 @@ async fn run_container_session(
             "requires_tty": requires_tty,
             "runtime_env": crate::sandbox::shared::runtime_env_summary(injected_envs),
             "target_args": target_args,
-        }))?;
+        })).await?;
     }
 
     async fn run_once(
@@ -1175,7 +1175,7 @@ async fn run_container_session(
                 "container_id": id,
                 "argv": args,
                 "tty": tty,
-            }))?;
+            })).await?;
         }
 
         let status = Command::new("container")
@@ -1216,7 +1216,7 @@ async fn run_container_session(
             "container_id": id,
             "exit_code": status.code(),
             "duration_ms": started_at.elapsed().as_millis(),
-        }))?;
+        })).await?;
     }
 
     if status.success() {

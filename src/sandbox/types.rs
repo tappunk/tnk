@@ -12,11 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::fs::OpenOptions;
-use std::io::Write;
 use std::path::PathBuf;
 
 use tokio::fs;
+use tokio::io::AsyncWriteExt;
 
 pub struct TerminalStateGuard {
     fds: Vec<(i32, libc::termios)>,
@@ -61,13 +60,14 @@ impl AuditLogger {
         Self { path }
     }
 
-    pub fn write_event(&self, event: serde_json::Value) -> Result<(), color_eyre::Report> {
-        let mut file = OpenOptions::new()
+    pub async fn write_event(&self, event: serde_json::Value) -> Result<(), color_eyre::Report> {
+        let mut file = tokio::fs::OpenOptions::new()
             .create(true)
             .append(true)
-            .open(&self.path)?;
-        let serialized = serde_json::to_string(&event)?;
-        writeln!(file, "{}", serialized)?;
+            .open(&self.path)
+            .await?;
+        let line = format!("{}\n", serde_json::to_string(&event)?);
+        file.write_all(line.as_bytes()).await?;
         Ok(())
     }
 }

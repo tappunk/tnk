@@ -370,6 +370,31 @@ async fn kill_runtime_target(pid: u32, sig: i32) {
     }
 }
 
+async fn handle_engine_signal(
+    child_pid: u32,
+    spec_name: &str,
+    shutdown_requested: &mut bool,
+    signal_name: &str,
+) {
+    if child_pid == 0 {
+        return;
+    }
+    if !*shutdown_requested {
+        crate::ui::log_info(&format!(
+            "forwarding {} to {} pid {}",
+            signal_name, spec_name, child_pid
+        ));
+        kill_runtime_target(child_pid, libc::SIGTERM).await;
+        *shutdown_requested = true;
+    } else {
+        eprintln!(
+            "warning: second signal received, forwarding SIGKILL to {} pid {}",
+            spec_name, child_pid
+        );
+        kill_runtime_target(child_pid, libc::SIGKILL).await;
+    }
+}
+
 fn matches_runtime_process(spec: EngineRuntimeSpec, args: &str) -> bool {
     let executable = spec.executable;
     let argv0 = args.split_whitespace().next().unwrap_or("");
@@ -829,49 +854,13 @@ pub async fn start(
                     return Ok(());
                 }
                 _ = sigterm.recv() => {
-                    if child_pid != 0 {
-                        if !shutdown_requested {
-                            crate::ui::log_info(&format!(
-                                "forwarding SIGTERM to {} pid {}",
-                                spec.name, child_pid
-                            ));
-                            kill_runtime_target(child_pid, libc::SIGTERM).await;
-                            shutdown_requested = true;
-                        } else {
-                            eprintln!("warning: second signal received, forwarding SIGKILL to {} pid {}", spec.name, child_pid);
-                            kill_runtime_target(child_pid, libc::SIGKILL).await;
-                        }
-                    }
+                    handle_engine_signal(child_pid, spec.name, &mut shutdown_requested, "SIGTERM").await;
                 }
                 _ = sigint.recv() => {
-                    if child_pid != 0 {
-                        if !shutdown_requested {
-                            crate::ui::log_info(&format!(
-                                "forwarding SIGINT to {} pid {}",
-                                spec.name, child_pid
-                            ));
-                            kill_runtime_target(child_pid, libc::SIGTERM).await;
-                            shutdown_requested = true;
-                        } else {
-                            eprintln!("warning: second signal received, forwarding SIGKILL to {} pid {}", spec.name, child_pid);
-                            kill_runtime_target(child_pid, libc::SIGKILL).await;
-                        }
-                    }
+                    handle_engine_signal(child_pid, spec.name, &mut shutdown_requested, "SIGINT").await;
                 }
                 _ = sighup.recv() => {
-                    if child_pid != 0 {
-                        if !shutdown_requested {
-                            crate::ui::log_info(&format!(
-                                "forwarding SIGHUP to {} pid {}",
-                                spec.name, child_pid
-                            ));
-                            kill_runtime_target(child_pid, libc::SIGTERM).await;
-                            shutdown_requested = true;
-                        } else {
-                            eprintln!("warning: second signal received, forwarding SIGKILL to {} pid {}", spec.name, child_pid);
-                            kill_runtime_target(child_pid, libc::SIGKILL).await;
-                        }
-                    }
+                    handle_engine_signal(child_pid, spec.name, &mut shutdown_requested, "SIGHUP").await;
                 }
             }
         }

@@ -372,7 +372,6 @@ async fn kill_runtime_target(pid: u32, sig: i32) {
 
 async fn handle_engine_signal(
     child_pid: u32,
-    spec_name: &str,
     shutdown_requested: &mut bool,
     signal_name: &str,
 ) {
@@ -381,15 +380,15 @@ async fn handle_engine_signal(
     }
     if !*shutdown_requested {
         crate::ui::log_info(&format!(
-            "forwarding {} to {} pid {}",
-            signal_name, spec_name, child_pid
+            "forwarding {} to engine pid {}",
+            signal_name, child_pid
         ));
         kill_runtime_target(child_pid, libc::SIGTERM).await;
         *shutdown_requested = true;
     } else {
         eprintln!(
-            "warning: second signal received, forwarding SIGKILL to {} pid {}",
-            spec_name, child_pid
+            "warning: second signal received, forwarding SIGKILL to engine pid {}",
+            child_pid
         );
         kill_runtime_target(child_pid, libc::SIGKILL).await;
     }
@@ -825,7 +824,7 @@ pub async fn start(
     fs::remove_file(&pid_file).await.ok();
 
     if foreground {
-        crate::ui::log_info(&format!("{} starting on {}:{}", spec.name, bind_host, port));
+        crate::ui::log_info(&format!("engine starting on {}:{}", bind_host, port));
 
         let mut child = AsyncCommand::new(spec.executable);
         child
@@ -854,21 +853,21 @@ pub async fn start(
                     return Ok(());
                 }
                 _ = sigterm.recv() => {
-                    handle_engine_signal(child_pid, spec.name, &mut shutdown_requested, "SIGTERM").await;
+                    handle_engine_signal(child_pid, &mut shutdown_requested, "SIGTERM").await;
                 }
                 _ = sigint.recv() => {
-                    handle_engine_signal(child_pid, spec.name, &mut shutdown_requested, "SIGINT").await;
+                    handle_engine_signal(child_pid, &mut shutdown_requested, "SIGINT").await;
                 }
                 _ = sighup.recv() => {
-                    handle_engine_signal(child_pid, spec.name, &mut shutdown_requested, "SIGHUP").await;
+                    handle_engine_signal(child_pid, &mut shutdown_requested, "SIGHUP").await;
                 }
             }
         }
     }
 
     eprintln!(
-        "{} starting (background) on {}:{}",
-        spec.name, bind_host, port
+        "engine starting (background) on {}:{}",
+        bind_host, port
     );
 
     let stdout_file = std::fs::OpenOptions::new()
@@ -900,8 +899,7 @@ pub async fn start(
             tokio::time::sleep(std::time::Duration::from_millis(200)).await;
             if !crate::lifecycle::is_process_alive(pid) {
                 return Err(color_eyre::eyre::eyre!(
-                    "{} exited immediately after spawn (pid {})",
-                    spec.name,
+                    "engine exited immediately after spawn (pid {})",
                     pid
                 ));
             }
@@ -944,8 +942,8 @@ pub async fn stop(runtime: &str) -> Result<(), color_eyre::Report> {
             target_pids.push(pid);
         } else {
             eprintln!(
-                "warning: stale pid file for non-{} process {}, removing",
-                spec.name, pid
+                "warning: stale pid file for non-engine process {}, removing",
+                pid
             );
         }
     }
@@ -981,7 +979,7 @@ async fn stop_pid(spec: EngineRuntimeSpec, pid: u32) {
         return;
     }
 
-    crate::ui::log_info(&format!("stopping {} pid {}", spec.name, pid));
+    crate::ui::log_info(&format!("stopping engine pid {}", pid));
     kill_runtime_target(pid, libc::SIGTERM).await;
 
     let mut died = false;
@@ -994,16 +992,16 @@ async fn stop_pid(spec: EngineRuntimeSpec, pid: u32) {
     }
 
     if died {
-        crate::ui::log_info(&format!("stopped {} pid {}", spec.name, pid));
+        crate::ui::log_info(&format!("stopped engine pid {}", pid));
     } else if is_runtime_pid(spec, pid).await {
         eprintln!(
-            "warning: sigterm failed for {} pid {}, escalating to sigkill",
-            spec.name, pid
+            "warning: sigterm failed for engine pid {}, escalating to sigkill",
+            pid
         );
         kill_runtime_target(pid, libc::SIGKILL).await;
-        crate::ui::log_info(&format!("killed {} pid {}", spec.name, pid));
+        crate::ui::log_info(&format!("killed engine pid {}", pid));
     } else {
-        crate::ui::log_info(&format!("stopped {} pid {}", spec.name, pid));
+        crate::ui::log_info(&format!("stopped engine pid {}", pid));
     }
 }
 

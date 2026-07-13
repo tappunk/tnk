@@ -128,13 +128,6 @@ impl TnkConfig {
     }
 }
 
-/// Expand path prefixes supported by this function:
-/// - `~/` and `~` — resolved to `$HOME`
-/// - `$HOME` — resolved to `$HOME` (with or without trailing slash)
-/// - `${HOME}/` — resolved to `$HOME`
-///
-/// Note: only `$HOME` is expanded; other env vars like `$USER`, `$WORKSPACE`,
-/// etc. are not substituted.
 fn expand_path(path: String, home: &str) -> String {
     if let Some(stripped) = path.strip_prefix("~/") {
         format!("{}/{}", home, stripped)

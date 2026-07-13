@@ -369,8 +369,6 @@ async fn kill_runtime_target(pid: u32, sig: i32) {
     }
 }
 
-/// Call waitpid with WNOHANG. Returns Some(exit status) if the process has exited,
-/// None if it is still running or the PID is unknown.
 fn waitpid_nowait(pid: u32) -> Option<i32> {
     let mut status = 0i32;
     let ret = unsafe { libc::waitpid(pid as i32, &mut status, libc::WNOHANG) };
@@ -688,7 +686,6 @@ pub async fn is_running() -> bool {
     false
 }
 
-/// A parsed snapshot of `ps` output, cached for a single status call.
 pub struct PsSnapshot {
     pids: Vec<(u32, String)>,
 }

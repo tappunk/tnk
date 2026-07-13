@@ -6,8 +6,6 @@ use tokio::fs;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
-/// Baseline provisioning script for tnk container/lima instances.
-/// Shared across services.rs, container.rs, and lima.rs provision logic.
 pub const BASELINE_PROVISION_SCRIPT: &str = "\
 #!/usr/bin/env bash
 set -eu
@@ -23,11 +21,8 @@ printf 'tnk ALL=(ALL) NOPASSWD:ALL\\n' >/etc/sudoers.d/tnk
 chmod 0440 /etc/sudoers.d/tnk
 ";
 
-/// Provision marker file created by tnk-services provision script.
-/// Shared across services.rs and engine.rs.
 pub const PROVISION_MARKER: &str = "$HOME/.tnk/provisioned-v1";
 
-/// Provision state check: verifies tnk-services provisioned state via marker file.
 pub const PROVISION_STATE_CHECK: &str = "test -f $HOME/.tnk/provisioned-v1";
 
 pub fn parse_explicit_env(input: &str) -> Result<(String, String), color_eyre::Report> {

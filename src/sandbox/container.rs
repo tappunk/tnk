@@ -244,9 +244,6 @@ impl SandboxBackend for ContainerBackend {
         let settings = container_profile_settings(&profile_name, &project_root).await?;
         let needs_profile_provision = profile_name != "base" && !settings.uses_golden_image;
         let deferred_network_isolation = settings.network_none && needs_profile_provision;
-        if deferred_network_isolation {
-            // Will be handled after provisioning
-        }
 
         let exists = container_exists(&id).await;
         if !exists {

@@ -130,7 +130,6 @@ fn sync_managed_dirs(src: &Path, dst: &Path) -> Result<(), color_eyre::Report> {
                 remove_dir_all(&dst_path)?;
             }
             if let Err(_e) = std::fs::rename(&src_path, &dst_path) {
-                // Fallback: rename fails with EXDEV across filesystems
                 copy_dir_contents(&src_path, &dst_path)
                     .map_err(|e| color_eyre::eyre::eyre!("failed to sync {}: {}", dir_name, e))?;
                 std::fs::remove_dir_all(&src_path).map_err(|e| {

@@ -369,12 +369,6 @@ async fn kill_runtime_target(pid: u32, sig: i32) {
     }
 }
 
-fn waitpid_nowait(pid: u32) -> Option<i32> {
-    let mut status = 0i32;
-    let ret = unsafe { libc::waitpid(pid as i32, &mut status, libc::WNOHANG) };
-    if ret > 0 { Some(status) } else { None }
-}
-
 fn matches_runtime_process(spec: EngineRuntimeSpec, args: &str) -> bool {
     let executable = spec.executable;
     let argv0 = args.split_whitespace().next().unwrap_or("");
@@ -913,24 +907,7 @@ pub async fn start(
             let pid = c.id();
             drop(c);
 
-            let mut early_exit = None;
-            for _ in 0..50 {
-                if let Some(status_code) = waitpid_nowait(pid) {
-                    early_exit = Some(status_code);
-                    break;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-            }
-
-            if let Some(status_code) = early_exit {
-                return Err(color_eyre::eyre::eyre!(
-                    "{} exited immediately after spawn (pid {}, exit code {})",
-                    spec.name,
-                    pid,
-                    status_code
-                ));
-            }
-
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
             if !crate::lifecycle::is_process_alive(pid) {
                 return Err(color_eyre::eyre::eyre!(
                     "{} exited immediately after spawn (pid {})",

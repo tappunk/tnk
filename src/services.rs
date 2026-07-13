@@ -613,10 +613,22 @@ async fn wait_for_lima_user(
 ) -> Result<(), color_eyre::Report> {
     let started = Instant::now();
     loop {
-        let check =
-            limactl_output(&["shell", id, "--", "bash", "-lc", &format!("id -u {}", user)]).await;
-        if matches!(check, Ok(out) if out.status.success()) {
-            return Ok(());
+        let check = tokio::time::timeout(
+            Duration::from_secs(15),
+            limactl_output(&["shell", id, "--", "bash", "-lc", &format!("id -u {}", user)]),
+        )
+        .await;
+
+        match check {
+            Ok(Ok(out)) if out.status.success() => return Ok(()),
+            Ok(Ok(_)) => {} // shell failed, retry
+            Ok(Err(_)) => {} // limactl error, retry
+            Err(_) => {
+                crate::ui::log_verbose(&format!(
+                    "lima shell check timed out after 15s for instance '{}'",
+                    id
+                ));
+            }
         }
 
         if started.elapsed() >= timeout {

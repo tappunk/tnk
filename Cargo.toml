@@ -32,7 +32,7 @@ tokio = { version = "=1.52.3", features = ["full"] }
 serde = { version = "=1.0.228", features = ["derive"] }
 serde_json = "=1.0.150"
 toml = "=0.8.23"
-reqwest = { version = "=0.12.28", features = ["json"] }
+reqwest = { version = "=0.12.28", features = ["json", "stream"] }
 color-eyre = "=0.6.5"
 libc = "=0.2.186"
 dirs = "=6.0.0"
@@ -40,6 +40,7 @@ tempfile = "=3.24.0"
 serde_yaml = "=0.9.34"
 shell-words = "=1.1.0"
 async-trait = "=0.1.88"
+tokio-stream = { version = "=0.1.17", features = ["full"] }
 
 [profile.release]
 opt-level = 3

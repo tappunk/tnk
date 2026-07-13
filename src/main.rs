@@ -15,6 +15,7 @@
 pub mod catalog;
 pub mod config;
 pub mod doctor;
+pub mod download;
 pub mod engine;
 pub mod init;
 pub mod lifecycle;
@@ -140,6 +141,27 @@ enum Commands {
     Image {
         #[command(subcommand)]
         action: ImageCommands,
+    },
+
+    #[command(about = "Download models from Hugging Face Hub")]
+    Download {
+        #[arg(help = "Hugging Face URL, hf:// URI, or repo ID (namespace/name)")]
+        url: String,
+
+        #[arg(short, long, value_enum, default_value_t = OutputFormat::Text)]
+        output: OutputFormat,
+
+        #[arg(short = 'n', long, help = "Preview files without downloading")]
+        dry_run: bool,
+
+        #[arg(long, help = "Custom revision (branch, tag, or commit)")]
+        revision: Option<String>,
+
+        #[arg(long, default_value_t = 4, help = "Maximum concurrent downloads")]
+        workers: usize,
+
+        #[arg(long, help = "Overwrite existing files even if sizes match")]
+        force: bool,
     },
 }
 
@@ -579,6 +601,14 @@ async fn run() -> Result<(), color_eyre::Report> {
         Some(Commands::Image { action }) => match action {
             ImageCommands::Build { profile } => sandbox::build_golden_image(profile).await?,
         },
+        Some(Commands::Download {
+            url,
+            output,
+            dry_run,
+            revision,
+            workers,
+            force,
+        }) => download::run(url, output, dry_run, revision, workers, force).await?,
         Some(Commands::Completion { shell }) => {
             let mut cmd = Cli::command();
             generate(shell, &mut cmd, "tnk", &mut std::io::stdout());

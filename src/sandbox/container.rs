@@ -554,23 +554,27 @@ impl SandboxBackend for ContainerBackend {
 
         let _terminal_state_guard = (use_tty && requires_tty).then(TerminalStateGuard::capture);
         if let Some(logger) = &audit {
-            logger.write_event(serde_json::json!({
-                "event": "session_start",
-                "ts": crate::sandbox::shared::now_unix_seconds(),
-                "container_id": id,
-                "workdir": guest_workdir_str,
-                "tty": use_tty && requires_tty,
-                "requires_tty": requires_tty,
-                "runtime_env": crate::sandbox::shared::runtime_env_summary(runtime_envs),
-            })).await?;
-            logger.write_event(serde_json::json!({
-                "event": "exec_invocation",
-                "ts": crate::sandbox::shared::now_unix_seconds(),
-                "container_id": id,
-                "argv": args,
-                "tty": use_tty && requires_tty,
-                "runtime_env": crate::sandbox::shared::runtime_env_summary(runtime_envs),
-            })).await?;
+            logger
+                .write_event(serde_json::json!({
+                    "event": "session_start",
+                    "ts": crate::sandbox::shared::now_unix_seconds(),
+                    "container_id": id,
+                    "workdir": guest_workdir_str,
+                    "tty": use_tty && requires_tty,
+                    "requires_tty": requires_tty,
+                    "runtime_env": crate::sandbox::shared::runtime_env_summary(runtime_envs),
+                }))
+                .await?;
+            logger
+                .write_event(serde_json::json!({
+                    "event": "exec_invocation",
+                    "ts": crate::sandbox::shared::now_unix_seconds(),
+                    "container_id": id,
+                    "argv": args,
+                    "tty": use_tty && requires_tty,
+                    "runtime_env": crate::sandbox::shared::runtime_env_summary(runtime_envs),
+                }))
+                .await?;
         }
         let mut child_cmd = Command::new("container");
         child_cmd.args(&args);
@@ -628,12 +632,14 @@ impl SandboxBackend for ContainerBackend {
         };
 
         if let Some(logger) = &audit {
-            logger.write_event(serde_json::json!({
-                "event": "session_exit",
-                "ts": crate::sandbox::shared::now_unix_seconds(),
-                "container_id": id,
-                "exit_code": status.code(),
-            })).await?;
+            logger
+                .write_event(serde_json::json!({
+                    "event": "session_exit",
+                    "ts": crate::sandbox::shared::now_unix_seconds(),
+                    "container_id": id,
+                    "exit_code": status.code(),
+                }))
+                .await?;
         }
 
         if let Some(task) = resize_task {
@@ -1130,16 +1136,18 @@ async fn run_container_session(
 
     let started_at = Instant::now();
     if let Some(logger) = audit {
-        logger.write_event(serde_json::json!({
-            "event": "session_start",
-            "ts": crate::sandbox::shared::now_unix_seconds(),
-            "container_id": id,
-            "workdir": guest_workdir,
-            "tty": use_tty,
-            "requires_tty": requires_tty,
-            "runtime_env": crate::sandbox::shared::runtime_env_summary(injected_envs),
-            "target_args": target_args,
-        })).await?;
+        logger
+            .write_event(serde_json::json!({
+                "event": "session_start",
+                "ts": crate::sandbox::shared::now_unix_seconds(),
+                "container_id": id,
+                "workdir": guest_workdir,
+                "tty": use_tty,
+                "requires_tty": requires_tty,
+                "runtime_env": crate::sandbox::shared::runtime_env_summary(injected_envs),
+                "target_args": target_args,
+            }))
+            .await?;
     }
 
     async fn run_once(
@@ -1169,13 +1177,15 @@ async fn run_container_session(
         args.extend(target_args.iter().map(|s| s.to_string()));
 
         if let Some(logger) = audit {
-            logger.write_event(serde_json::json!({
-                "event": "exec_invocation",
-                "ts": crate::sandbox::shared::now_unix_seconds(),
-                "container_id": id,
-                "argv": args,
-                "tty": tty,
-            })).await?;
+            logger
+                .write_event(serde_json::json!({
+                    "event": "exec_invocation",
+                    "ts": crate::sandbox::shared::now_unix_seconds(),
+                    "container_id": id,
+                    "argv": args,
+                    "tty": tty,
+                }))
+                .await?;
         }
 
         let status = Command::new("container")
@@ -1210,13 +1220,15 @@ async fn run_container_session(
     };
 
     if let Some(logger) = audit {
-        logger.write_event(serde_json::json!({
-            "event": "session_exit",
-            "ts": crate::sandbox::shared::now_unix_seconds(),
-            "container_id": id,
-            "exit_code": status.code(),
-            "duration_ms": started_at.elapsed().as_millis(),
-        })).await?;
+        logger
+            .write_event(serde_json::json!({
+                "event": "session_exit",
+                "ts": crate::sandbox::shared::now_unix_seconds(),
+                "container_id": id,
+                "exit_code": status.code(),
+                "duration_ms": started_at.elapsed().as_millis(),
+            }))
+            .await?;
     }
 
     if status.success() {

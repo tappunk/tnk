@@ -263,8 +263,9 @@ async fn start_container(dry_run: bool) -> Result<(), color_eyre::Report> {
         let searxng_url = format!("http://{}:18766", host_gateway);
 
         let home = home.clone();
-        let provision_result: Result<(), color_eyre::Report> =
-            tokio::time::timeout(Duration::from_secs(600), spawn_blocking(move || {
+        let provision_result: Result<(), color_eyre::Report> = tokio::time::timeout(
+            Duration::from_secs(600),
+            spawn_blocking(move || {
                 let provision_script = PathBuf::from(&home)
                     .join(".config/tnk/sandbox.d/container/provision.d/tnk-services.sh");
                 if !provision_script.is_file() {
@@ -326,10 +327,11 @@ async fn start_container(dry_run: bool) -> Result<(), color_eyre::Report> {
                     ));
                 }
                 Ok(())
-            }))
-            .await
-            .map_err(|_| color_eyre::eyre::eyre!("provision timed out after 600s"))?
-            .map_err(|e| color_eyre::eyre::eyre!("provision task error: {}", e))?;
+            }),
+        )
+        .await
+        .map_err(|_| color_eyre::eyre::eyre!("provision timed out after 600s"))?
+        .map_err(|e| color_eyre::eyre::eyre!("provision task error: {}", e))?;
         provision_result?;
     }
 
@@ -621,7 +623,7 @@ async fn wait_for_lima_user(
 
         match check {
             Ok(Ok(out)) if out.status.success() => return Ok(()),
-            Ok(Ok(_)) => {} // shell failed, retry
+            Ok(Ok(_)) => {}  // shell failed, retry
             Ok(Err(_)) => {} // limactl error, retry
             Err(_) => {
                 crate::ui::log_verbose(&format!(
@@ -765,11 +767,8 @@ async fn stop_lima(dry_run: bool) -> Result<(), color_eyre::Report> {
         return Ok(());
     }
     let id = "tnk-services";
-    let graceful = tokio::time::timeout(
-        Duration::from_secs(60),
-        limactl_output(&["stop", id]),
-    )
-    .await;
+    let graceful =
+        tokio::time::timeout(Duration::from_secs(60), limactl_output(&["stop", id])).await;
 
     let graceful_ok = match graceful {
         Ok(Ok(output)) => output.status.success(),
@@ -781,11 +780,7 @@ async fn stop_lima(dry_run: bool) -> Result<(), color_eyre::Report> {
             "warning: graceful stop for '{}' did not succeed, escalating to force stop",
             id
         );
-        limactl_run_or_err(
-            &["stop", "--force", id],
-            "failed to stop services instance",
-        )
-        .await?;
+        limactl_run_or_err(&["stop", "--force", id], "failed to stop services instance").await?;
     }
     Ok(())
 }

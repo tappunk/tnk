@@ -577,15 +577,17 @@ impl SandboxBackend for LimaBackend {
         let script = shell_parts.join(" && ");
 
         if let Some(logger) = &audit {
-            logger.write_event(serde_json::json!({
-                "event": "session_start",
-                "ts": crate::sandbox::shared::now_unix_seconds(),
-                "container_id": id,
-                "workdir": guest_workdir_str,
-                "tty": use_tty && requires_tty,
-                "requires_tty": requires_tty,
-                "runtime_env": crate::sandbox::shared::runtime_env_summary(runtime_envs),
-            })).await?;
+            logger
+                .write_event(serde_json::json!({
+                    "event": "session_start",
+                    "ts": crate::sandbox::shared::now_unix_seconds(),
+                    "container_id": id,
+                    "workdir": guest_workdir_str,
+                    "tty": use_tty && requires_tty,
+                    "requires_tty": requires_tty,
+                    "runtime_env": crate::sandbox::shared::runtime_env_summary(runtime_envs),
+                }))
+                .await?;
             logger.write_event(serde_json::json!({
                 "event": "exec_invocation",
                 "ts": crate::sandbox::shared::now_unix_seconds(),
@@ -617,12 +619,14 @@ impl SandboxBackend for LimaBackend {
         let status = child.wait().await?;
 
         if let Some(logger) = &audit {
-            logger.write_event(serde_json::json!({
-                "event": "session_exit",
-                "ts": crate::sandbox::shared::now_unix_seconds(),
-                "container_id": id,
-                "exit_code": status.code(),
-            })).await?;
+            logger
+                .write_event(serde_json::json!({
+                    "event": "session_exit",
+                    "ts": crate::sandbox::shared::now_unix_seconds(),
+                    "container_id": id,
+                    "exit_code": status.code(),
+                }))
+                .await?;
         }
 
         if status.success() {

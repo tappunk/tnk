@@ -370,11 +370,7 @@ async fn kill_runtime_target(pid: u32, sig: i32) {
     }
 }
 
-async fn handle_engine_signal(
-    child_pid: u32,
-    shutdown_requested: &mut bool,
-    signal_name: &str,
-) {
+async fn handle_engine_signal(child_pid: u32, shutdown_requested: &mut bool, signal_name: &str) {
     if child_pid == 0 {
         return;
     }
@@ -865,10 +861,7 @@ pub async fn start(
         }
     }
 
-    eprintln!(
-        "engine starting (background) on {}:{}",
-        bind_host, port
-    );
+    eprintln!("engine starting (background) on {}:{}", bind_host, port);
 
     let stdout_file = std::fs::OpenOptions::new()
         .create(true)

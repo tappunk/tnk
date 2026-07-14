@@ -244,7 +244,7 @@ default_engine_runtime = "llama"
 # Auto-start tnk services when running `tnk run`
 services_auto_start = true
 
-# Bind host for inference server (127.0.0.1 for host-only, 0.0.0.0 for sandbox access)
+# Bind host for inference server (127.0.0.1 default)
 default_engine_bind_host = "127.0.0.1"
 
 # Preset to load when --preset is omitted from engine start.

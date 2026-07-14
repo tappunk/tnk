@@ -200,7 +200,7 @@ pub enum EngineCommands {
         preset: Option<String>,
         #[arg(
             long,
-            help = "Bind host for inference server (e.g. 127.0.0.1 or 0.0.0.0)"
+            help = "Bind host for inference server"
         )]
         bind_host: Option<String>,
         #[arg(

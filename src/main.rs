@@ -198,10 +198,7 @@ pub enum EngineCommands {
         runtime: Option<String>,
         #[arg(long, help = "Preset name to load (must match a file in provider.d/)")]
         preset: Option<String>,
-        #[arg(
-            long,
-            help = "Bind host for inference server"
-        )]
+        #[arg(long, help = "Bind host for inference server")]
         bind_host: Option<String>,
         #[arg(
             long,

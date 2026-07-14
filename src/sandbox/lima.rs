@@ -1294,7 +1294,6 @@ async fn run_provision_lima(
     let openai_url = shell_escape(&format!("http://{}:{}/v1", host_gateway, port));
     let mcp_bridge_url = shell_escape(&format!("http://{}:18765", host_gateway));
     let searxng_url = shell_escape(&format!("http://{}:18766", host_gateway));
-    let host_gateway_escaped = shell_escape(&host_gateway);
     let provision_cmd = format!(
         r#"set -eu -o pipefail
 export TNK_OPENAI_URL={}
@@ -1305,7 +1304,6 @@ export TNK_MODEL_NAME={}
 export TNK_CTX_WINDOW={}
 export TNK_WORKSPACE_MOUNT={}
 export TNK_SPECS_REV={}
-export TNK_CONTAINER_HOST_GATEWAY={}
 export TNK_ENGINE_RUNTIME={}
 bash {}"#,
         openai_url,
@@ -1316,7 +1314,6 @@ bash {}"#,
         ctx_window,
         shell_escape(mount_path),
         shell_escape(&specs_rev),
-        host_gateway_escaped,
         shell_escape(engine_runtime),
         shell_escape(&guest_script_path),
     );

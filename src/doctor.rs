@@ -104,7 +104,7 @@ fn check_locks_dir() -> Result<(), color_eyre::Report> {
     Ok(())
 }
 
-async fn check_managed_containers() -> Result<(), color_eyre::Report> {
+async fn check_managed_instances() -> Result<(), color_eyre::Report> {
     let items = list_lima_instances().await?;
     let count = items.iter().filter(|id| id.starts_with("tnk-")).count();
     crate::ui::log_info(&format!("managed lima instances detected: {}", count));
@@ -119,7 +119,7 @@ pub async fn run() -> Result<(), color_eyre::Report> {
     check_engine().await?;
     check_services().await?;
     check_locks_dir()?;
-    check_managed_containers().await?;
+    check_managed_instances().await?;
 
     eprintln!("ok: diagnostics completed");
     Ok(())

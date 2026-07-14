@@ -7,13 +7,11 @@
 //     http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "IS BASIS",
+// distributed under the License is distributed on an "AS IS" BASIS,
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod container;
-pub mod container_utils;
 pub mod lima;
 pub mod shared;
 pub mod types;
@@ -24,8 +22,6 @@ use async_trait::async_trait;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-
-use crate::config;
 
 #[derive(serde::Deserialize, Debug, Clone, Default)]
 pub struct SandboxManifest {
@@ -47,49 +43,11 @@ pub struct SecurityCaps {
     pub workspace_mode: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum Runtime {
-    Container,
-    #[default]
-    Lima,
-}
-
-impl Runtime {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Runtime::Container => "container",
-            Runtime::Lima => "lima",
-        }
-    }
-
-    pub fn try_from_str(s: &str) -> Option<Self> {
-        match s {
-            "container" => Some(Runtime::Container),
-            "lima" => Some(Runtime::Lima),
-            _ => None,
-        }
-    }
-}
-
 #[derive(Debug, Clone, Serialize)]
 pub struct SandboxEntry {
     pub id: String,
     pub status: String,
     pub mount: String,
-}
-
-pub fn resolve_runtime(
-    runtime_flag: Option<String>,
-    default_sandbox_runtime: Option<String>,
-) -> Result<Runtime, color_eyre::Report> {
-    if let Some(flag) = runtime_flag {
-        return Runtime::try_from_str(&flag)
-            .ok_or_else(|| color_eyre::eyre::eyre!("unsupported sandbox runtime: {}", flag));
-    }
-    Ok(default_sandbox_runtime
-        .as_deref()
-        .and_then(Runtime::try_from_str)
-        .unwrap_or_default())
 }
 
 #[derive(Debug, Clone, Default)]
@@ -101,6 +59,9 @@ pub struct ProfileSettings {
     pub image: String,
     pub uses_golden_image: bool,
 }
+
+pub use lima::LimaBackend;
+pub use lima::resolve_workspace_context;
 
 #[async_trait]
 #[allow(clippy::too_many_arguments)]
@@ -166,87 +127,25 @@ pub trait SandboxBackend: Sized {
     ) -> Result<(String, u32), color_eyre::Report>;
 }
 
-pub trait BackendRuntimeContract {
-    fn host_gateway_url(port: u16) -> String;
-    fn inference_url(host: &str, port: u16) -> String;
-    fn mcp_bridge_url(host: &str) -> String;
-    fn searxng_url(host: &str) -> String;
+pub async fn sandbox_exists(id: &str) -> Result<bool, color_eyre::Report> {
+    LimaBackend::exists(id).await
 }
 
-impl BackendRuntimeContract for Runtime {
-    fn host_gateway_url(port: u16) -> String {
-        format!("http://127.0.0.1:{}", port)
-    }
-
-    fn inference_url(host: &str, port: u16) -> String {
-        format!("http://{}:{}/v1", host, port)
-    }
-
-    fn mcp_bridge_url(host: &str) -> String {
-        format!("http://{}:18765", host)
-    }
-
-    fn searxng_url(host: &str) -> String {
-        format!("http://{}:18766", host)
-    }
-}
-
-pub use container::ContainerBackend;
-pub use lima::LimaBackend;
-
-pub use container::build_golden_image_impl as build_golden_image;
-pub use container::{cleanup_untracked_vms, resolve_workspace_context, sandbox_exists};
-
-pub async fn sandbox_exists_with_runtime(
-    id: &str,
-    runtime_flag: Option<String>,
-) -> Result<bool, color_eyre::Report> {
-    let cfg = config::load().await?;
-    let runtime = resolve_runtime(runtime_flag, cfg.default_sandbox_runtime.clone())?;
-
-    match runtime {
-        Runtime::Container => ContainerBackend::exists(id).await,
-        Runtime::Lima => LimaBackend::exists(id).await,
-    }
-}
-
-pub async fn stop(
-    names: Vec<String>,
-    all: bool,
-    runtime_flag: Option<String>,
-) -> Result<(), color_eyre::Report> {
-    let cfg = config::load().await?;
-    let runtime = resolve_runtime(runtime_flag, cfg.default_sandbox_runtime.clone())?;
-
-    match runtime {
-        Runtime::Container => ContainerBackend::stop(names, all).await?,
-        Runtime::Lima => LimaBackend::stop(names, all).await?,
-    }
+pub async fn stop(names: Vec<String>, all: bool) -> Result<(), color_eyre::Report> {
+    LimaBackend::stop(names, all).await?;
     Ok(())
 }
 
-pub async fn delete_sandbox(
-    id: &str,
-    force: bool,
-    runtime_flag: Option<String>,
-) -> Result<(), color_eyre::Report> {
-    let cfg = config::load().await?;
-    let runtime = resolve_runtime(runtime_flag, cfg.default_sandbox_runtime.clone())?;
-
-    match runtime {
-        Runtime::Container => ContainerBackend::delete(id, force).await?,
-        Runtime::Lima => LimaBackend::delete(id, force).await?,
-    }
+pub async fn delete_sandbox(id: &str, force: bool) -> Result<(), color_eyre::Report> {
+    LimaBackend::delete(id, force).await?;
     Ok(())
 }
 
 pub async fn start(
     profile_name: String,
     audit_log: Option<String>,
-    runtime_flag: Option<String>,
 ) -> Result<(), color_eyre::Report> {
-    let cfg = config::load().await?;
-    let runtime = resolve_runtime(runtime_flag, cfg.default_sandbox_runtime.clone())?;
+    let cfg = crate::config::load().await?;
     let (id, project_root, _workdir) = resolve_workspace_context()?;
 
     let settings = resolve_profile_settings(&profile_name, &project_root).await?;
@@ -256,23 +155,10 @@ pub async fn start(
     let (active_model, _ctx_window) =
         crate::sandbox::shared::resolve_active_model_and_ctx_impl(&home, server_port, engine_name)
             .await;
-    let runtime_envs = match runtime {
-        Runtime::Container => {
-            ContainerBackend::runtime_env(&id, server_port, engine_name, &active_model).await?
-        }
-        Runtime::Lima => {
-            LimaBackend::runtime_env(&id, server_port, engine_name, &active_model).await?
-        }
-    };
+    let runtime_envs =
+        LimaBackend::runtime_env(&id, server_port, engine_name, &active_model).await?;
 
-    match runtime {
-        Runtime::Container => {
-            ContainerBackend::start(profile_name, audit_log, &settings, &runtime_envs).await?
-        }
-        Runtime::Lima => {
-            LimaBackend::start(profile_name, audit_log, &settings, &runtime_envs).await?
-        }
-    }
+    LimaBackend::start(profile_name, audit_log, &settings, &runtime_envs).await?;
 
     Ok(())
 }
@@ -283,10 +169,8 @@ pub async fn shell(
     no_tty: bool,
     explicit_envs: Vec<String>,
     audit_log: Option<String>,
-    runtime_flag: Option<String>,
 ) -> Result<(), color_eyre::Report> {
-    let cfg = config::load().await?;
-    let runtime = resolve_runtime(runtime_flag, cfg.default_sandbox_runtime.clone())?;
+    let cfg = crate::config::load().await?;
     let (id, project_root, _workdir) = resolve_workspace_context()?;
 
     let settings = resolve_profile_settings("base", &project_root).await?;
@@ -296,57 +180,25 @@ pub async fn shell(
     let (active_model, _ctx_window) =
         crate::sandbox::shared::resolve_active_model_and_ctx_impl(&home, server_port, engine_name)
             .await;
-    let runtime_envs = match runtime {
-        Runtime::Container => {
-            ContainerBackend::runtime_env(&id, server_port, engine_name, &active_model).await?
-        }
-        Runtime::Lima => {
-            LimaBackend::runtime_env(&id, server_port, engine_name, &active_model).await?
-        }
-    };
+    let runtime_envs =
+        LimaBackend::runtime_env(&id, server_port, engine_name, &active_model).await?;
 
-    match runtime {
-        Runtime::Container => {
-            ContainerBackend::shell(
-                profile,
-                command,
-                no_tty,
-                explicit_envs,
-                audit_log,
-                &settings,
-                &runtime_envs,
-            )
-            .await?
-        }
-        Runtime::Lima => {
-            LimaBackend::shell(
-                profile,
-                command,
-                no_tty,
-                explicit_envs,
-                audit_log,
-                &settings,
-                &runtime_envs,
-            )
-            .await?
-        }
-    }
+    LimaBackend::shell(
+        profile,
+        command,
+        no_tty,
+        explicit_envs,
+        audit_log,
+        &settings,
+        &runtime_envs,
+    )
+    .await?;
 
     Ok(())
 }
 
-pub async fn ls(
-    out_fmt: crate::OutputFormat,
-    quiet: bool,
-    runtime_flag: Option<String>,
-) -> Result<(), color_eyre::Report> {
-    let cfg = config::load().await?;
-    let runtime = resolve_runtime(runtime_flag, cfg.default_sandbox_runtime.clone())?;
-
-    let entries = match runtime {
-        Runtime::Container => ContainerBackend::ls().await?,
-        Runtime::Lima => LimaBackend::ls().await?,
-    };
+pub async fn ls(out_fmt: crate::OutputFormat, quiet: bool) -> Result<(), color_eyre::Report> {
+    let entries = LimaBackend::ls().await?;
 
     if entries.is_empty() {
         if out_fmt == crate::OutputFormat::Json {
@@ -385,6 +237,10 @@ pub async fn ls(
     }
 
     Ok(())
+}
+
+pub async fn cleanup_untracked_vms(verbose: bool) -> Result<(), color_eyre::Report> {
+    LimaBackend::cleanup_untracked(verbose).await
 }
 
 async fn resolve_profile_settings(

@@ -14,75 +14,6 @@
 
 use tokio::process::Command as AsyncCommand;
 
-fn selected_runtime() -> crate::sandbox::Runtime {
-    crate::config::load_blocking()
-        .ok()
-        .and_then(|cfg| crate::sandbox::resolve_runtime(None, cfg.default_sandbox_runtime).ok())
-        .unwrap_or_default()
-}
-
-async fn discover_sandbox_containers() -> Vec<String> {
-    let output = AsyncCommand::new("container")
-        .args(["list", "--all", "--format", "json"])
-        .output()
-        .await
-        .ok()
-        .filter(|o| o.status.success());
-
-    match output {
-        Some(out) => serde_json::from_slice::<Vec<serde_json::Value>>(&out.stdout)
-            .ok()
-            .map(|items| {
-                items
-                    .iter()
-                    .filter_map(|item| {
-                        let id = item
-                            .get("id")
-                            .or_else(|| item.get("ID"))
-                            .or_else(|| item.get("Id"))
-                            .and_then(|v| v.as_str())
-                            .or_else(|| {
-                                item.get("configuration")
-                                    .or_else(|| item.get("Configuration"))
-                                    .or_else(|| item.get("config"))
-                                    .or_else(|| item.get("Config"))
-                                    .and_then(|v| {
-                                        v.get("id").or_else(|| v.get("ID")).or_else(|| v.get("Id"))
-                                    })
-                                    .and_then(|v| v.as_str())
-                            })?;
-                        let labels = item
-                            .get("configuration")
-                            .or_else(|| item.get("Configuration"))
-                            .or_else(|| item.get("config"))
-                            .or_else(|| item.get("Config"))
-                            .and_then(|v| v.get("labels").or_else(|| v.get("Labels")));
-                        let managed = labels
-                            .and_then(|v| v.get("tnk.managed"))
-                            .and_then(|v| v.as_str())
-                            .is_some_and(|v| v == "true");
-                        let owner_project = labels
-                            .and_then(|v| v.get("tnk.owner"))
-                            .and_then(|v| v.as_str())
-                            .is_some_and(|v| v == "project");
-                        if id.starts_with("tnk-")
-                            && id != "tnk-services"
-                            && id != "tnk-searxng"
-                            && managed
-                            && owner_project
-                        {
-                            Some(id.to_string())
-                        } else {
-                            None
-                        }
-                    })
-                    .collect()
-            })
-            .unwrap_or_default(),
-        None => Vec::new(),
-    }
-}
-
 async fn discover_lima_sandboxes() -> Vec<String> {
     let output = AsyncCommand::new("limactl")
         .args(["list", "--format", "{{.Name}}"])
@@ -104,18 +35,6 @@ async fn discover_lima_sandboxes() -> Vec<String> {
             .map(ToString::to_string)
             .collect(),
         None => Vec::new(),
-    }
-}
-
-async fn stop_container(name: String, timeout_secs: u64) {
-    let status = AsyncCommand::new("container")
-        .args(["stop", "--time", &timeout_secs.to_string(), &name])
-        .output()
-        .await;
-
-    match status {
-        Ok(out) if out.status.success() => crate::ui::log_info(&format!("stopped {}", name)),
-        Ok(_) | Err(_) => eprintln!("warning: failed to stop {}", name),
     }
 }
 
@@ -152,39 +71,19 @@ async fn stop_engine() {
     }
 }
 
-pub async fn run(timeout_secs: Option<u64>, dry_run: bool) -> Result<(), color_eyre::Report> {
+pub async fn run(_timeout_secs: Option<u64>, dry_run: bool) -> Result<(), color_eyre::Report> {
     if dry_run {
         crate::ui::log_info("dry run, skipping shutdown actions");
         return Ok(());
     }
 
-    let timeout = timeout_secs.unwrap_or(30);
-    let runtime = selected_runtime();
+    let _lock =
+        crate::lifecycle::acquire("lima-lifecycle", std::time::Duration::from_secs(20)).await?;
 
-    match runtime {
-        crate::sandbox::Runtime::Container => {
-            let _lock = crate::lifecycle::acquire(
-                "container-lifecycle",
-                std::time::Duration::from_secs(20),
-            )
-            .await?;
-
-            for container in discover_sandbox_containers().await {
-                stop_container(container, timeout).await;
-            }
-            crate::services::stop(false, Some("container".to_string())).await?;
-        }
-        crate::sandbox::Runtime::Lima => {
-            let _lock =
-                crate::lifecycle::acquire("lima-lifecycle", std::time::Duration::from_secs(20))
-                    .await?;
-
-            for instance in discover_lima_sandboxes().await {
-                stop_lima(instance).await;
-            }
-            crate::services::stop(false, Some("lima".to_string())).await?;
-        }
+    for instance in discover_lima_sandboxes().await {
+        stop_lima(instance).await;
     }
+    crate::services::stop(false).await?;
 
     stop_engine().await;
     crate::ui::log_info("shutdown complete");

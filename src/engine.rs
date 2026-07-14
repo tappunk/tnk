@@ -24,7 +24,6 @@ use tokio::signal::unix::{SignalKind, signal};
 
 use crate::config;
 use crate::model;
-use crate::sandbox::container_utils;
 
 use shell_words;
 
@@ -519,35 +518,6 @@ async fn detect_running_model_for_runtime(spec: EngineRuntimeSpec) -> Option<Str
     }
 
     None
-}
-
-fn selected_sandbox_runtime() -> crate::sandbox::Runtime {
-    config::load_blocking()
-        .ok()
-        .and_then(|cfg| crate::sandbox::resolve_runtime(None, cfg.default_sandbox_runtime).ok())
-        .unwrap_or_default()
-}
-
-async fn list_container_sandboxes() -> Vec<(String, String)> {
-    let Some(items) = container_utils::container_list_all().await else {
-        return Vec::new();
-    };
-
-    let mut rows = Vec::new();
-    for item in items {
-        let id = item.id().unwrap_or_default().to_string();
-        if !id.starts_with("tnk-") || id == "tnk-services" || id == "tnk-searxng" {
-            continue;
-        }
-
-        let status = item.status_state().unwrap_or("unknown").to_string();
-
-        let token = id.strip_prefix("tnk-").unwrap_or(&id).to_string();
-        rows.push((token, status));
-    }
-
-    rows.sort_by(|a, b| a.0.cmp(&b.0));
-    rows
 }
 
 async fn list_lima_sandboxes() -> Vec<(String, String)> {
@@ -1079,88 +1049,29 @@ pub async fn status(output: crate::OutputFormat) -> Result<(), color_eyre::Repor
         print_runtime_status(spec.name, active_model, *running, *configured);
     }
 
-    match selected_sandbox_runtime() {
-        crate::sandbox::Runtime::Container => {
-            let services_container = "tnk-services";
-            let searxng_container = "tnk-searxng";
-            let container_items = container_utils::container_list_all()
-                .await
-                .unwrap_or_default();
+    let services_running = AsyncCommand::new("limactl")
+        .args(["list", "--format", "{{.Status}}", "tnk-services"])
+        .output()
+        .await
+        .ok()
+        .filter(|out| out.status.success())
+        .map(|out| {
+            String::from_utf8_lossy(&out.stdout)
+                .trim()
+                .eq_ignore_ascii_case("running")
+        })
+        .unwrap_or(false);
+    let mcp_state = if services_running {
+        "running"
+    } else {
+        "stopped"
+    };
+    print_status_row("mcp (lima)", mcp_state, "");
+    print_status_row("searxng (lima)", mcp_state, "");
 
-            let services_item = container_items
-                .iter()
-                .find(|item| item.id() == Some(services_container));
-            if let Some(item) = services_item {
-                let state = item.status_state().unwrap_or("unknown");
-                let status = if state.eq_ignore_ascii_case("running") {
-                    "running"
-                } else {
-                    "stopped"
-                };
-                let provision_output = AsyncCommand::new("container")
-                    .args([
-                        "exec",
-                        services_container,
-                        "bash",
-                        "-c",
-                        crate::sandbox::shared::PROVISION_STATE_CHECK,
-                    ])
-                    .output()
-                    .await
-                    .ok();
-
-                let mcp_state = match (status, provision_output) {
-                    ("running", Some(out)) if out.status.success() => "running",
-                    ("running", _) => "degraded",
-                    _ => "stopped",
-                };
-                print_status_row("mcp (container)", mcp_state, "");
-            }
-
-            let searxng_item = container_items
-                .iter()
-                .find(|item| item.id() == Some(searxng_container));
-            if let Some(item) = searxng_item {
-                let state = item.status_state().unwrap_or("unknown");
-                let status = if state.eq_ignore_ascii_case("running") {
-                    "running"
-                } else {
-                    "stopped"
-                };
-                print_status_row("searxng (container)", status, "");
-            }
-
-            for (token, status) in &list_container_sandboxes().await {
-                let label = format!("sandbox (container) {}", token);
-                print_status_row(&label, status, "");
-            }
-        }
-        crate::sandbox::Runtime::Lima => {
-            let services_running = AsyncCommand::new("limactl")
-                .args(["list", "--format", "{{.Status}}", "tnk-services"])
-                .output()
-                .await
-                .ok()
-                .filter(|out| out.status.success())
-                .map(|out| {
-                    String::from_utf8_lossy(&out.stdout)
-                        .trim()
-                        .eq_ignore_ascii_case("running")
-                })
-                .unwrap_or(false);
-            let mcp_state = if services_running {
-                "running"
-            } else {
-                "stopped"
-            };
-            print_status_row("mcp (lima)", mcp_state, "");
-            print_status_row("searxng (lima)", mcp_state, "");
-
-            for (token, status) in &list_lima_sandboxes().await {
-                let label = format!("sandbox (lima) {}", token);
-                print_status_row(&label, status, "");
-            }
-        }
+    for (token, status) in &list_lima_sandboxes().await {
+        let label = format!("sandbox (lima) {}", token);
+        print_status_row(&label, status, "");
     }
 
     Ok(())
@@ -1220,121 +1131,27 @@ pub async fn print_status() -> Result<(), color_eyre::Report> {
         print_status_row("engine", "running", &detail);
     }
 
-    match selected_sandbox_runtime() {
-        crate::sandbox::Runtime::Container => {
-            let container_items = AsyncCommand::new("container")
-                .args(["list", "--all", "--format", "json"])
-                .output()
-                .await
-                .ok()
-                .filter(|out| out.status.success())
-                .and_then(|out| serde_json::from_slice::<Vec<serde_json::Value>>(&out.stdout).ok())
-                .unwrap_or_default();
+    let services_running = AsyncCommand::new("limactl")
+        .args(["list", "--format", "{{.Status}}", "tnk-services"])
+        .output()
+        .await
+        .ok()
+        .filter(|out| out.status.success())
+        .map(|out| {
+            String::from_utf8_lossy(&out.stdout)
+                .trim()
+                .eq_ignore_ascii_case("running")
+        })
+        .unwrap_or(false);
+    if services_running {
+        print_status_row("mcp (lima)", "running", "");
+        print_status_row("searxng (lima)", "running", "");
+    }
 
-            let mcp_row = container_items.iter().find(|item| {
-                let id = item
-                    .get("id")
-                    .and_then(|v| v.as_str())
-                    .or_else(|| {
-                        item.get("configuration")
-                            .and_then(|v| v.get("id"))
-                            .and_then(|v| v.as_str())
-                    })
-                    .unwrap_or_default();
-                id == "tnk-services"
-            });
-
-            if let Some(item) = mcp_row {
-                let state = item
-                    .get("status")
-                    .and_then(|v| v.get("state"))
-                    .and_then(|v| v.as_str())
-                    .or_else(|| item.get("state").and_then(|v| v.as_str()))
-                    .unwrap_or("unknown");
-                let mcp_state = if state.eq_ignore_ascii_case("running") {
-                    let provision_output = AsyncCommand::new("container")
-                        .args([
-                            "exec",
-                            "tnk-services",
-                            "bash",
-                            "-c",
-                            crate::sandbox::shared::PROVISION_STATE_CHECK,
-                        ])
-                        .output()
-                        .await
-                        .ok();
-                    if provision_output
-                        .map(|out| out.status.success())
-                        .unwrap_or(false)
-                    {
-                        "running"
-                    } else {
-                        "degraded"
-                    }
-                } else {
-                    "stopped"
-                };
-                if mcp_state != "stopped" {
-                    print_status_row("mcp (container)", mcp_state, "");
-                }
-            }
-
-            let searxng_row = container_items.iter().find(|item| {
-                let id = item
-                    .get("id")
-                    .and_then(|v| v.as_str())
-                    .or_else(|| {
-                        item.get("configuration")
-                            .and_then(|v| v.get("id"))
-                            .and_then(|v| v.as_str())
-                    })
-                    .unwrap_or_default();
-                id == "tnk-searxng"
-            });
-
-            if let Some(item) = searxng_row {
-                let state = item
-                    .get("status")
-                    .and_then(|v| v.get("state"))
-                    .and_then(|v| v.as_str())
-                    .or_else(|| item.get("state").and_then(|v| v.as_str()))
-                    .unwrap_or("unknown");
-                if state.eq_ignore_ascii_case("running") {
-                    print_status_row("searxng (container)", "running", "");
-                }
-            }
-
-            let active_sandboxes = list_container_sandboxes().await;
-            for (token, status) in &active_sandboxes {
-                if status.eq_ignore_ascii_case("running") {
-                    print_status_row(&format!("sandbox (container) {}", token), "running", "");
-                }
-            }
-        }
-        crate::sandbox::Runtime::Lima => {
-            let services_running = AsyncCommand::new("limactl")
-                .args(["list", "--format", "{{.Status}}", "tnk-services"])
-                .output()
-                .await
-                .ok()
-                .filter(|out| out.status.success())
-                .map(|out| {
-                    String::from_utf8_lossy(&out.stdout)
-                        .trim()
-                        .eq_ignore_ascii_case("running")
-                })
-                .unwrap_or(false);
-            if services_running {
-                print_status_row("mcp (lima)", "running", "");
-                print_status_row("searxng (lima)", "running", "");
-            }
-
-            let active_sandboxes = list_lima_sandboxes().await;
-            for (token, status) in &active_sandboxes {
-                if status.eq_ignore_ascii_case("running") {
-                    print_status_row(&format!("sandbox (lima) {}", token), "running", "");
-                }
-            }
+    let active_sandboxes = list_lima_sandboxes().await;
+    for (token, status) in &active_sandboxes {
+        if status.eq_ignore_ascii_case("running") {
+            print_status_row(&format!("sandbox (lima) {}", token), "running", "");
         }
     }
 

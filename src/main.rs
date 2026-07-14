@@ -137,12 +137,6 @@ enum Commands {
     #[command(about = "Run diagnostics and health checks")]
     Doctor,
 
-    #[command(about = "Manage pre-baked sandbox golden images")]
-    Image {
-        #[command(subcommand)]
-        action: ImageCommands,
-    },
-
     #[command(about = "Download models from Hugging Face Hub")]
     Download {
         #[arg(help = "Hugging Face URL, hf:// URI, or repo ID (namespace/name)")]
@@ -166,43 +160,26 @@ enum Commands {
 }
 
 #[derive(Subcommand)]
-pub enum ImageCommands {
-    #[command(about = "Build a golden image from a provision profile")]
-    Build {
-        #[arg(long, help = "Profile to pre-bake into a local image")]
-        profile: String,
-    },
-}
-
-#[derive(Subcommand)]
 pub enum ServicesCommands {
     #[command(about = "Start tnk services runtime")]
     Start {
         #[arg(short = 'n', long, help = "Preview actions without side effects")]
         dry_run: bool,
-        #[arg(long, help = "Services runtime backend (lima)")]
-        runtime: Option<String>,
     },
     #[command(about = "Stop tnk services runtime")]
     Stop {
         #[arg(short = 'n', long, help = "Preview actions without side effects")]
         dry_run: bool,
-        #[arg(long, help = "Services runtime backend (lima)")]
-        runtime: Option<String>,
     },
     #[command(about = "Show tnk services runtime status")]
     Status {
         #[arg(short, long, value_enum, default_value_t = OutputFormat::Text)]
         output: OutputFormat,
-        #[arg(long, help = "Services runtime backend (lima)")]
-        runtime: Option<String>,
     },
     #[command(about = "Restart tnk services runtime")]
     Restart {
         #[arg(short = 'n', long, help = "Preview actions without side effects")]
         dry_run: bool,
-        #[arg(long, help = "Services runtime backend (lima)")]
-        runtime: Option<String>,
     },
     #[command(about = "Delete tnk services runtime")]
     Delete {
@@ -210,8 +187,6 @@ pub enum ServicesCommands {
         yes: bool,
         #[arg(short = 'n', long, help = "Preview actions without side effects")]
         dry_run: bool,
-        #[arg(long, help = "Services runtime backend (lima)")]
-        runtime: Option<String>,
     },
 }
 
@@ -273,8 +248,6 @@ pub enum SandboxCommands {
         profile: Option<String>,
         #[arg(long, help = "Write session audit logs to this NDJSON file path")]
         audit_log: Option<String>,
-        #[arg(long, help = "Sandbox backend runtime (lima)")]
-        runtime: Option<String>,
         #[arg(long, alias = "enter", help = "Attach interactive shell after start")]
         shell: bool,
     },
@@ -301,8 +274,6 @@ pub enum SandboxCommands {
         env: Vec<String>,
         #[arg(long, help = "Write session audit logs to this NDJSON file path")]
         audit_log: Option<String>,
-        #[arg(long, help = "Sandbox backend runtime (lima)")]
-        runtime: Option<String>,
     },
     #[command(about = "Stop active sandbox, selected sandboxes, or all sandboxes")]
     Stop {
@@ -314,8 +285,6 @@ pub enum SandboxCommands {
             help = "Stop a specific sandbox by name (repeatable)"
         )]
         name: Vec<String>,
-        #[arg(long, help = "Sandbox backend runtime (lima)")]
-        runtime: Option<String>,
     },
     #[command(about = "Delete active sandbox")]
     Delete {
@@ -323,8 +292,6 @@ pub enum SandboxCommands {
         yes: bool,
         #[arg(short = 'n', long, help = "Preview actions without side effects")]
         dry_run: bool,
-        #[arg(long, help = "Sandbox backend runtime (lima)")]
-        runtime: Option<String>,
     },
     #[command(about = "List sandbox instances")]
     Ls {
@@ -332,15 +299,22 @@ pub enum SandboxCommands {
         output: OutputFormat,
         #[arg(short, long, help = "Output only sandbox names (one per line)")]
         quiet: bool,
-        #[arg(long, help = "Sandbox backend runtime (lima)")]
-        runtime: Option<String>,
     },
 }
 
 #[tokio::main]
-async fn main() -> color_eyre::Result<()> {
-    color_eyre::install()?;
-    run().await
+async fn main() {
+    color_eyre::install().unwrap();
+    if let Err(err) = run().await {
+        let code = crate::ui::exit_code_for_error(&err);
+        let msg = err.to_string();
+        if code == crate::ui::ExitCode::Error {
+            eprintln!("{err}");
+        } else {
+            eprintln!("error: {}", msg.lines().next().unwrap_or(&msg));
+        }
+        std::process::exit(code.as_i32());
+    }
 }
 
 async fn boot(preset: Option<String>, runtime: Option<String>) -> Result<(), color_eyre::Report> {
@@ -370,7 +344,7 @@ async fn boot(preset: Option<String>, runtime: Option<String>) -> Result<(), col
         if !crate::ui::is_quiet() {
             eprintln!("starting services...");
         }
-        services::start(false, None).await?;
+        services::start(false).await?;
         if !crate::ui::is_quiet() {
             eprintln!("services ready");
         }
@@ -448,7 +422,6 @@ async fn run() -> Result<(), color_eyre::Report> {
             SandboxCommands::Start {
                 profile,
                 audit_log,
-                runtime,
                 shell,
             } => {
                 let home = std::env::var("HOME")?;
@@ -463,18 +436,11 @@ async fn run() -> Result<(), color_eyre::Report> {
                     .chain(profiles.iter().map(|p| p.name.clone()))
                     .collect();
 
-                let resolved_runtime =
-                    sandbox::resolve_runtime(runtime.clone(), cfg.default_sandbox_runtime.clone())?;
-
-                let (container_id, _, _) = sandbox::resolve_workspace_context()?;
-                let sandbox_exists = if container_id.is_empty() {
+                let (sandbox_id, _, _) = sandbox::resolve_workspace_context()?;
+                let sandbox_exists = if sandbox_id.is_empty() {
                     false
                 } else {
-                    sandbox::sandbox_exists_with_runtime(
-                        &container_id,
-                        Some(resolved_runtime.as_str().to_string()),
-                    )
-                    .await?
+                    sandbox::sandbox_exists(&sandbox_id).await?
                 };
 
                 let profile_name = match profile {
@@ -496,8 +462,7 @@ async fn run() -> Result<(), color_eyre::Report> {
                 };
 
                 let selected_profile = profile_name;
-                let selected_runtime = runtime.clone();
-                sandbox::start(selected_profile.clone(), audit_log.clone(), runtime).await?;
+                sandbox::start(selected_profile.clone(), audit_log.clone()).await?;
 
                 if shell {
                     use std::io::IsTerminal;
@@ -511,8 +476,7 @@ async fn run() -> Result<(), color_eyre::Report> {
                         );
                     }
 
-                    sandbox::shell(None, None, false, Vec::new(), audit_log, selected_runtime)
-                        .await?;
+                    sandbox::shell(None, None, false, Vec::new(), audit_log).await?;
                 }
             }
             SandboxCommands::Shell {
@@ -521,36 +485,27 @@ async fn run() -> Result<(), color_eyre::Report> {
                 no_tty,
                 env,
                 audit_log,
-                runtime,
-            } => sandbox::shell(profile, command, no_tty, env, audit_log, runtime).await?,
-            SandboxCommands::Stop { all, name, runtime } => {
+            } => sandbox::shell(profile, command, no_tty, env, audit_log).await?,
+            SandboxCommands::Stop { all, name } => {
                 if all && !name.is_empty() {
                     return Err(color_eyre::eyre::eyre!(
                         "--all cannot be combined with --name"
                     ));
                 }
-                sandbox::stop(name, all, runtime).await?
+                sandbox::stop(name, all).await?
             }
-            SandboxCommands::Delete {
-                yes,
-                dry_run,
-                runtime,
-            } => {
+            SandboxCommands::Delete { yes, dry_run } => {
                 if dry_run {
                     crate::ui::log_info("dry run, skipping sandbox deletion");
                     return Ok(());
                 }
-                let (container_id, _, _) = sandbox::resolve_workspace_context()?;
-                if container_id.is_empty() || container_id == "tnk-config" {
+                let (sandbox_id, _, _) = sandbox::resolve_workspace_context()?;
+                if sandbox_id.is_empty() || sandbox_id == "tnk-config" {
                     ui::exit_with(ui::ExitCode::Usage, "must be inside a project directory");
                 }
-                sandbox::delete_sandbox(&container_id, yes, runtime).await?
+                sandbox::delete_sandbox(&sandbox_id, yes).await?
             }
-            SandboxCommands::Ls {
-                output,
-                quiet,
-                runtime,
-            } => sandbox::ls(output, quiet, runtime).await?,
+            SandboxCommands::Ls { output, quiet } => sandbox::ls(output, quiet).await?,
         },
         Some(Commands::Services { action }) => services::run(action).await?,
         Some(Commands::Run {
@@ -598,9 +553,6 @@ async fn run() -> Result<(), color_eyre::Report> {
         Some(Commands::Doctor) => {
             doctor::run().await?;
         }
-        Some(Commands::Image { action }) => match action {
-            ImageCommands::Build { profile } => sandbox::build_golden_image(profile).await?,
-        },
         Some(Commands::Download {
             url,
             output,

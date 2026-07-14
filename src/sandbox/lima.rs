@@ -12,14 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::sandbox::Runtime;
 use crate::{config, lifecycle, ui};
 
 use super::types::{
     TerminalStateGuard, resolve_audit_logger, shell_escape, validate_engine_runtime,
     validate_script_name,
 };
-use super::{BackendRuntimeContract, ProfileSettings, SandboxBackend, SandboxEntry};
+use super::{ProfileSettings, SandboxBackend, SandboxEntry};
 
 use std::fmt::Write;
 use std::io::IsTerminal;
@@ -28,7 +27,6 @@ use std::process::Stdio;
 use std::time::Instant;
 use tokio::fs;
 use tokio::process::Command;
-use tokio::task::spawn_blocking;
 
 const SAFE_ENV_ALLOWLIST: &[&str] = &["TERM", "COLORTERM", "COLUMNS", "LINES"];
 
@@ -318,7 +316,7 @@ impl SandboxBackend for LimaBackend {
     const BINARY: &'static str = "limactl";
 
     async fn resolve_id() -> Result<(String, PathBuf, PathBuf), color_eyre::Report> {
-        spawn_blocking(super::container::resolve_workspace_context).await?
+        resolve_workspace_context()
     }
 
     async fn start(
@@ -788,9 +786,9 @@ impl SandboxBackend for LimaBackend {
         model_name: &str,
     ) -> Result<Vec<(String, String)>, color_eyre::Report> {
         let host_gateway = Self::resolve_gateway(id).await?;
-        let inference_url = Runtime::inference_url(&host_gateway, port);
-        let mcp_bridge_url = Runtime::mcp_bridge_url(&host_gateway);
-        let searxng_url = Runtime::searxng_url(&host_gateway);
+        let inference_url = format!("http://{}:{}/v1", host_gateway, port);
+        let mcp_bridge_url = format!("http://{}:18765", host_gateway);
+        let searxng_url = format!("http://{}:18766", host_gateway);
 
         Ok(vec![
             ("TNK_INFERENCE_URL".to_string(), inference_url.clone()),
@@ -812,6 +810,148 @@ impl SandboxBackend for LimaBackend {
                 .await,
         )
     }
+}
+
+fn sanitize_project_name(name: &str) -> Option<String> {
+    let sanitized: String = name
+        .chars()
+        .filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_')
+        .collect();
+
+    if sanitized.is_empty() {
+        return None;
+    }
+
+    Some(sanitized)
+}
+
+fn project_name_suffix(seed: &str) -> String {
+    let hash = seed
+        .as_bytes()
+        .iter()
+        .fold(0xcbf29ce484222325_u64, |acc, b| {
+            (acc ^ u64::from(*b)).wrapping_mul(0x100000001b3)
+        });
+    format!("{:08x}", (hash & 0xffff_ffff) as u32)
+}
+
+pub fn resolve_workspace_context() -> Result<(String, PathBuf, PathBuf), color_eyre::Report> {
+    let current_dir = std::env::current_dir()?;
+    let home = std::env::var("HOME")?;
+    let canonical_current_dir = current_dir.canonicalize()?;
+
+    let raw_workspace_root = if let Ok(v) = std::env::var("TNK_WORKSPACE_ROOT") {
+        v
+    } else if let Ok(cfg) = config::load_blocking() {
+        cfg.workspace_root
+            .unwrap_or_else(|| format!("{}/src", home))
+    } else {
+        format!("{}/src", home)
+    };
+
+    let workspace_root = raw_workspace_root
+        .strip_prefix("~/")
+        .map(|p| format!("{}/{}", home, p))
+        .unwrap_or(raw_workspace_root);
+
+    let tnk_config_dir = PathBuf::from(&home).join(".config/tnk");
+    if tnk_config_dir.exists()
+        && let Ok(canonical_tnk_config_dir) = tnk_config_dir.canonicalize()
+        && canonical_current_dir.starts_with(&canonical_tnk_config_dir)
+    {
+        return Ok(("tnk-config".to_string(), tnk_config_dir, current_dir));
+    }
+
+    let workspace_path = PathBuf::from(&workspace_root);
+    let canonical_workspace_path = match workspace_path.canonicalize() {
+        Ok(path) => path,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            eprintln!("error: workspace root '{}' does not exist", workspace_root);
+            eprintln!(
+                "info: create it with 'mkdir -p {}' or set TNK_WORKSPACE_ROOT",
+                workspace_root
+            );
+            return Err(color_eyre::eyre::eyre!(
+                "workspace root '{}' does not exist",
+                workspace_root
+            ));
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {
+            return Err(color_eyre::eyre::eyre!(
+                "permission denied resolving workspace root '{}': {}",
+                workspace_root,
+                err
+            ));
+        }
+        Err(err) => {
+            return Err(color_eyre::eyre::eyre!(
+                "failed to canonicalize workspace root '{}': {}",
+                workspace_root,
+                err
+            ));
+        }
+    };
+    let canonical_home = PathBuf::from(&home)
+        .canonicalize()
+        .map_err(|e| color_eyre::eyre::eyre!("failed to canonicalize home directory: {}", e))?;
+
+    validate_workspace_root(&canonical_workspace_path, &canonical_home)?;
+
+    if canonical_current_dir == canonical_workspace_path {
+        return Err(color_eyre::eyre::eyre!(
+            "navigate into a project directory first"
+        ));
+    }
+
+    let relative = canonical_current_dir
+        .strip_prefix(&canonical_workspace_path)
+        .map_err(|_| {
+            color_eyre::eyre::eyre!("current directory is outside the configured workspace root")
+        })?;
+    let project_component = relative
+        .components()
+        .next()
+        .ok_or_else(|| color_eyre::eyre::eyre!("invalid workspace path"))?
+        .as_os_str();
+    let project_name = project_component
+        .to_str()
+        .ok_or_else(|| color_eyre::eyre::eyre!("invalid project name"))?;
+    let sanitized_project_name = sanitize_project_name(project_name)
+        .ok_or_else(|| color_eyre::eyre::eyre!("sanitized project name is empty"))?;
+    let project_token = if sanitized_project_name == project_name {
+        sanitized_project_name
+    } else {
+        format!(
+            "{}-{}",
+            sanitized_project_name,
+            project_name_suffix(project_name)
+        )
+    };
+
+    let project_folder = format!("tnk-{}", project_token);
+    let mount_point = canonical_workspace_path.join(project_component);
+
+    Ok((project_folder, mount_point, current_dir))
+}
+
+fn validate_workspace_root(workspace: &Path, home: &Path) -> Result<(), color_eyre::Report> {
+    if workspace == Path::new("/") {
+        return Err(color_eyre::eyre::eyre!("workspace root cannot be '/'"));
+    }
+    if workspace == Path::new("/Users") {
+        return Err(color_eyre::eyre::eyre!("workspace root cannot be '/Users'"));
+    }
+    if workspace == home {
+        return Err(color_eyre::eyre::eyre!(
+            "security violation: workspace root cannot be the home directory; use a dedicated subdirectory (for example, ~/src)"
+        ));
+    }
+    if !workspace.starts_with(home) {
+        return Err(color_eyre::eyre::eyre!(
+            "workspace root must be inside '$HOME'"
+        ));
+    }
+    Ok(())
 }
 
 fn lima_settings_from_profile_settings(

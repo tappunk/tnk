@@ -109,7 +109,7 @@ pub fn is_human_output(output: crate::OutputFormat) -> bool {
     io::stderr().is_terminal()
 }
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, PartialEq)]
 pub enum ExitCode {
     Usage = 64,
     NotFound = 66,
@@ -126,4 +126,16 @@ impl ExitCode {
 pub fn exit_with(code: ExitCode, msg: &str) -> ! {
     eprintln!("error: {msg}");
     std::process::exit(code.as_i32());
+}
+
+/// Map an error report to an exit code based on its message content.
+pub fn exit_code_for_error(err: &color_eyre::Report) -> ExitCode {
+    let msg = err.to_string().to_lowercase();
+    if msg.contains("outside the configured workspace root") {
+        ExitCode::Usage
+    } else if msg.contains("permission denied") {
+        ExitCode::PermissionDenied
+    } else {
+        ExitCode::Error
+    }
 }

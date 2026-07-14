@@ -20,9 +20,7 @@ target/
 # OS
 .DS_Store
 
-# Opencode config
-.opencode/
-
 # Project files
 AGENTS.md
 scripts/release.sh
+tnk.code-workspace

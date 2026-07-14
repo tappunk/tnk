@@ -1420,7 +1420,7 @@ dependencies = [
 
 [[package]]
 name = "tnk"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "async-trait",
  "clap",

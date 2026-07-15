@@ -69,24 +69,12 @@ const LLAMA_SPEC: EngineRuntimeSpec = EngineRuntimeSpec {
     default_bind_host: "127.0.0.1",
 };
 
-const VLLM_MLX_SPEC: EngineRuntimeSpec = EngineRuntimeSpec {
-    name: "vllm-mlx",
-    executable: "vllm-mlx",
-    pid_file_name: "vllm-mlx.pid",
-    active_preset_file: "active-preset-name-vllm-mlx",
-    log_stdout: "vllm-mlx.log",
-    log_stderr: "vllm-mlx-err.log",
-    default_model_id: "mlx-community/Qwen3.6-35B-A3B-4bit",
-    default_bind_host: "127.0.0.1",
-};
-
-const SUPPORTED_RUNTIMES: [EngineRuntimeSpec; 3] = [LLAMA_SPEC, MLXCEL_SPEC, VLLM_MLX_SPEC];
+const SUPPORTED_RUNTIMES: [EngineRuntimeSpec; 2] = [LLAMA_SPEC, MLXCEL_SPEC];
 
 pub fn runtime_spec(runtime: &str) -> Option<EngineRuntimeSpec> {
     match runtime {
         "llama" => Some(LLAMA_SPEC),
         "mlxcel" => Some(MLXCEL_SPEC),
-        "vllm-mlx" => Some(VLLM_MLX_SPEC),
         _ => None,
     }
 }
@@ -96,7 +84,7 @@ pub fn supports_runtime(runtime: &str) -> bool {
 }
 
 pub fn supported_runtime_names() -> &'static [&'static str] {
-    &["llama", "mlxcel", "vllm-mlx"]
+    &["llama", "mlxcel"]
 }
 
 pub async fn resolve_runtime_for_profile(
@@ -315,7 +303,7 @@ fn pid_file_path(spec: EngineRuntimeSpec) -> Option<PathBuf> {
 
 async fn is_known_runtime_process(pid: u32) -> bool {
     tokio::task::spawn_blocking(move || {
-        let known = ["llama-server", "mlxcel-server", "vllm-mlx"];
+        let known = ["llama-server", "mlxcel-server"];
         let output = std::process::Command::new("ps")
             .args(["-p", &pid.to_string(), "-o", "comm="])
             .output();
@@ -609,31 +597,15 @@ async fn resolve_model_id_for_runtime(
     (expand_model_path(&model), Vec::new())
 }
 
-fn runtime_args(
-    spec: EngineRuntimeSpec,
-    model_id: &str,
-    host: &str,
-    port: u16,
-    extra: &[String],
-) -> Vec<String> {
-    let mut args = match spec.name {
-        "vllm-mlx" => vec![
-            "serve".to_string(),
-            model_id.to_string(),
-            "--host".to_string(),
-            host.to_string(),
-            "--port".to_string(),
-            port.to_string(),
-        ],
-        _ => vec![
-            "--model".to_string(),
-            model_id.to_string(),
-            "--host".to_string(),
-            host.to_string(),
-            "--port".to_string(),
-            port.to_string(),
-        ],
-    };
+fn runtime_args(model_id: &str, host: &str, port: u16, extra: &[String]) -> Vec<String> {
+    let mut args = vec![
+        "--model".to_string(),
+        model_id.to_string(),
+        "--host".to_string(),
+        host.to_string(),
+        "--port".to_string(),
+        port.to_string(),
+    ];
     args.extend_from_slice(extra);
     args
 }
@@ -646,7 +618,7 @@ fn build_command(
     extra: &[String],
 ) -> std::process::Command {
     let mut cmd = std::process::Command::new(spec.executable);
-    cmd.args(runtime_args(spec, model_id, host, port, extra));
+    cmd.args(runtime_args(model_id, host, port, extra));
     cmd
 }
 
@@ -794,7 +766,7 @@ pub async fn start(
 
         let mut child = AsyncCommand::new(spec.executable);
         child
-            .args(runtime_args(spec, &model_id, &bind_host, port, &extra))
+            .args(runtime_args(&model_id, &bind_host, port, &extra))
             .stdout(Stdio::inherit())
             .stderr(Stdio::inherit());
 
@@ -1239,15 +1211,6 @@ mod tests {
         assert_eq!(
             extract_model_from_args(args).as_deref(),
             Some("/tmp/model.gguf")
-        );
-    }
-
-    #[test]
-    fn extracts_vllm_model_from_serve_positional() {
-        let args = "vllm-mlx serve mlx-community/Qwen3.6-35B-A3B-4bit --port 8080";
-        assert_eq!(
-            extract_model_from_args(args).as_deref(),
-            Some("mlx-community/Qwen3.6-35B-A3B-4bit")
         );
     }
 }

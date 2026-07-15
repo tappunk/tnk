@@ -72,7 +72,8 @@ fn is_path_traversal(segment: &str) -> bool {
     segment == ".." || segment.starts_with("../")
 }
 
-fn is_valid_repo_path(path: &str) -> bool {
+#[must_use]
+fn is_invalid_repo_path(path: &str) -> bool {
     path.is_empty()
         || path.starts_with('/')
         || path.split('/').any(|seg| {
@@ -132,7 +133,7 @@ fn parse_hf_uri(input: &str) -> Result<HfUrl, color_eyre::Report> {
             revision
         ));
     }
-    if !path_in_repo.is_empty() && is_valid_repo_path(path_in_repo) {
+    if !path_in_repo.is_empty() && is_invalid_repo_path(path_in_repo) {
         return Err(color_eyre::eyre::eyre!(
             "hf:// URI: invalid path '{}'",
             path_in_repo
@@ -263,7 +264,7 @@ fn parse_plain_repo_id(input: &str) -> Result<HfUrl, color_eyre::Report> {
         ));
     }
 
-    if is_valid_repo_path(input) {
+    if is_invalid_repo_path(input) {
         return Err(color_eyre::eyre::eyre!(
             "invalid repository ID '{}': path traversal detected",
             input
@@ -446,20 +447,20 @@ pub async fn download_file(
         .map_err(|e| color_eyre::eyre::eyre!("failed to build HTTP client: {}", e))?;
 
     let resp = if start_offset > 0 {
-        let resp = client
+        client
             .get(&resolve_url)
             .header("User-Agent", "tnk/0.1.7")
             .header("Range", format!("bytes={}-", start_offset))
             .send()
-            .await;
-        retry_response(resp).await?
+            .await
+            .map_err(|e| color_eyre::eyre::eyre!("request failed: {}", e))?
     } else {
-        let resp = client
+        client
             .get(&resolve_url)
             .header("User-Agent", "tnk/0.1.7")
             .send()
-            .await;
-        retry_response(resp).await?
+            .await
+            .map_err(|e| color_eyre::eyre::eyre!("request failed: {}", e))?
     };
 
     let status = resp.status();
@@ -486,7 +487,15 @@ pub async fn download_file(
 
     tokio::fs::create_dir_all(tmp_path.parent().unwrap()).await?;
 
-    let mut file = tokio::fs::File::create(&tmp_path).await?;
+    let mut file = if start_offset > 0 {
+        tokio::fs::OpenOptions::new()
+            .write(true)
+            .append(true)
+            .open(&tmp_path)
+            .await?
+    } else {
+        tokio::fs::File::create(&tmp_path).await?
+    };
     let mut stream = resp.bytes_stream();
     let mut downloaded: u64 = start_offset;
     let start_time = std::time::Instant::now();
@@ -547,14 +556,15 @@ pub async fn download_file(
 
     if actual_size != expected_size {
         eprintln!(
-            "\nwarning: size mismatch for '{}' (expected {}, got {}) — redownload on next run",
+            "\nwarning: size mismatch for '{}' (expected {}, got {}) — cleaning up partial file",
             job.file.path, expected_size, actual_size
         );
+        tokio::fs::remove_file(&tmp_path).await.ok();
         return Ok(FileResult {
             path: job.file.path.clone(),
             size: expected_size,
             status: "error".to_string(),
-            local_path: Some(tmp_path.to_string_lossy().to_string()),
+            local_path: Some(job.local_path.to_string_lossy().to_string()),
         });
     }
 
@@ -585,19 +595,6 @@ fn urlencoding_path(path: &str) -> String {
         }
     }
     result
-}
-
-async fn retry_response(
-    result: Result<reqwest::Response, reqwest::Error>,
-) -> Result<reqwest::Response, color_eyre::Report> {
-    if let Ok(resp) = result {
-        return Ok(resp);
-    }
-
-    Err(color_eyre::eyre::eyre!(
-        "request failed: {}",
-        result.unwrap_err()
-    ))
 }
 
 pub async fn download_all(

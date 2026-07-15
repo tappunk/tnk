@@ -14,6 +14,8 @@
 
 use tokio::process::Command as AsyncCommand;
 
+use crate::ui;
+
 async fn discover_lima_sandboxes() -> Vec<String> {
     let output = AsyncCommand::new("limactl")
         .args(["list", "--format", "{{.Name}}"])
@@ -39,14 +41,43 @@ async fn discover_lima_sandboxes() -> Vec<String> {
 }
 
 async fn stop_lima(name: String) {
-    let status = AsyncCommand::new("limactl")
-        .args(["stop", "--force", &name])
-        .output()
-        .await;
+    let graceful = tokio::time::timeout(
+        std::time::Duration::from_secs(60),
+        AsyncCommand::new("limactl").args(["stop", &name]).output(),
+    )
+    .await;
 
-    match status {
-        Ok(out) if out.status.success() => crate::ui::log_info(&format!("stopped {}", name)),
-        Ok(_) | Err(_) => eprintln!("warning: failed to stop {}", name),
+    let graceful_ok = match graceful {
+        Ok(Ok(output)) => output.status.success(),
+        Ok(Err(_)) | Err(_) => false,
+    };
+
+    if graceful_ok {
+        ui::log_info(&format!("stopped {}", name));
+        return;
+    }
+
+    eprintln!(
+        "warning: graceful stop for '{}' did not succeed, escalating to force",
+        name
+    );
+    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+
+    let force = tokio::time::timeout(
+        std::time::Duration::from_secs(20),
+        AsyncCommand::new("limactl")
+            .args(["stop", "--force", &name])
+            .output(),
+    )
+    .await;
+
+    match force {
+        Ok(Ok(output)) if output.status.success() => {
+            ui::log_info(&format!("stopped {}", name));
+        }
+        Ok(Ok(_)) | Ok(Err(_)) | Err(_) => {
+            eprintln!("warning: failed to stop {}", name);
+        }
     }
 }
 

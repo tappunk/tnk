@@ -31,8 +31,9 @@ impl TerminalStateGuard {
                 continue;
             }
 
-            let mut termios = unsafe { std::mem::zeroed::<libc::termios>() };
-            let ok = unsafe { libc::tcgetattr(fd, &mut termios as *mut libc::termios) } == 0;
+            let mut termios: libc::termios =
+                unsafe { std::mem::MaybeUninit::zeroed().assume_init() };
+            let ok = unsafe { libc::tcgetattr(fd, &mut termios) } == 0;
             if ok {
                 fds.push((fd, termios));
             }
@@ -45,7 +46,7 @@ impl TerminalStateGuard {
 impl Drop for TerminalStateGuard {
     fn drop(&mut self) {
         for (fd, termios) in &self.fds {
-            let _ = unsafe { libc::tcsetattr(*fd, libc::TCSANOW, termios as *const libc::termios) };
+            let _ = unsafe { libc::tcsetattr(*fd, libc::TCSANOW, termios) };
         }
     }
 }

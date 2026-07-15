@@ -316,7 +316,7 @@ impl SandboxBackend for LimaBackend {
     const BINARY: &'static str = "limactl";
 
     async fn resolve_id() -> Result<(String, PathBuf, PathBuf), color_eyre::Report> {
-        resolve_workspace_context()
+        resolve_workspace_context().await
     }
 
     async fn start(
@@ -547,8 +547,6 @@ impl SandboxBackend for LimaBackend {
 
         let mut shell_parts = Vec::new();
 
-        shell_parts.push(format!("cd {} || exit 1", shell_escape(guest_workdir_str)));
-
         for key in SAFE_ENV_ALLOWLIST {
             if let Ok(value) = std::env::var(key) {
                 shell_parts.push(format!("export {}={}", key, shell_escape(&value)));
@@ -572,7 +570,7 @@ impl SandboxBackend for LimaBackend {
             }
         }
 
-        let script = shell_parts.join(" && ");
+        let script = shell_parts.join("; ");
 
         if let Some(logger) = &audit {
             logger
@@ -835,14 +833,14 @@ fn project_name_suffix(seed: &str) -> String {
     format!("{:08x}", (hash & 0xffff_ffff) as u32)
 }
 
-pub fn resolve_workspace_context() -> Result<(String, PathBuf, PathBuf), color_eyre::Report> {
+pub async fn resolve_workspace_context() -> Result<(String, PathBuf, PathBuf), color_eyre::Report> {
     let current_dir = std::env::current_dir()?;
     let home = std::env::var("HOME")?;
     let canonical_current_dir = current_dir.canonicalize()?;
 
     let raw_workspace_root = if let Ok(v) = std::env::var("TNK_WORKSPACE_ROOT") {
         v
-    } else if let Ok(cfg) = config::load_blocking() {
+    } else if let Ok(cfg) = config::load().await {
         cfg.workspace_root
             .unwrap_or_else(|| format!("{}/src", home))
     } else {
@@ -970,7 +968,7 @@ fn lima_settings_from_profile_settings(
             .as_deref()
             .map(str::trim)
             .filter(|s| !s.is_empty())
-            .unwrap_or("4GiB")
+            .unwrap_or("2GiB")
             .to_string(),
         disk_gib: 50,
         workspace_guest_path: settings.workspace_guest_path.clone(),
@@ -1276,7 +1274,7 @@ async fn run_provision_lima(
                 .arg("-c")
                 .arg(format!(
                     "cd {} && tar cf - . | limactl shell {} tar xf - -C {}",
-                    host_lib_dir.display(),
+                    shell_escape(&host_lib_dir.display().to_string()),
                     id,
                     guest_target_lib_dir
                 ))

@@ -1,10 +1,7 @@
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use tokio::fs;
-use tokio::io::AsyncWriteExt;
-use tokio::process::Command;
 
 pub const BASELINE_PROVISION_SCRIPT: &str = "\
 #!/usr/bin/env bash
@@ -20,10 +17,6 @@ install -d -m 755 /etc/sudoers.d
 printf 'tnk ALL=(ALL) NOPASSWD:ALL\\n' >/etc/sudoers.d/tnk
 chmod 0440 /etc/sudoers.d/tnk
 ";
-
-pub const PROVISION_MARKER: &str = "$HOME/.tnk/provisioned-v1";
-
-pub const PROVISION_STATE_CHECK: &str = "test -f $HOME/.tnk/provisioned-v1";
 
 pub fn parse_explicit_env(input: &str) -> Result<(String, String), color_eyre::Report> {
     let Some((key, value)) = input.split_once('=') else {
@@ -120,47 +113,27 @@ pub async fn compute_specs_revision_hash(
     script_path: &Path,
     lib_dir: Option<&Path>,
 ) -> Result<String, color_eyre::Report> {
+    use sha2::{Digest, Sha256};
+
     let mut files = vec![script_path.to_path_buf()];
     if let Some(dir) = lib_dir {
         files.extend(collect_regular_files_recursive(dir).await?);
     }
     files.sort();
 
-    let mut shasum_cmd = Command::new("shasum");
-    shasum_cmd.args(["-a", "256"]);
+    let mut first_pass_output = String::new();
     for file in &files {
-        shasum_cmd.arg(file);
+        let content = fs::read(file).await?;
+        let mut hasher = Sha256::new();
+        hasher.update(&content);
+        let digest = hasher.finalize();
+        first_pass_output.push_str(&format!("{:x}  {}\n", digest, file.display()));
     }
 
-    let output = shasum_cmd.output().await?;
-    if !output.status.success() {
-        return Err(color_eyre::eyre::eyre!(
-            "failed to compute provision hash for script"
-        ));
-    }
-
-    let mut second_pass = Command::new("shasum")
-        .args(["-a", "256"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .spawn()?;
-    if let Some(mut stdin) = second_pass.stdin.take() {
-        stdin.write_all(&output.stdout).await?;
-        stdin.shutdown().await?;
-    }
-    let second_output = second_pass.wait_with_output().await?;
-    if !second_output.status.success() {
-        return Err(color_eyre::eyre::eyre!(
-            "failed to finalize provision hash digest"
-        ));
-    }
-
-    let stdout = String::from_utf8_lossy(&second_output.stdout);
-    let hash = stdout
-        .split_whitespace()
-        .next()
-        .ok_or_else(|| color_eyre::eyre::eyre!("invalid shasum output"))?;
-    Ok(hash.to_string())
+    let mut final_hasher = Sha256::new();
+    final_hasher.update(first_pass_output.as_bytes());
+    let final_digest = final_hasher.finalize();
+    Ok(format!("{:x}", final_digest))
 }
 
 pub async fn resolve_active_model_and_ctx_impl(

@@ -433,7 +433,7 @@ async fn run() -> Result<(), color_eyre::Report> {
                     .chain(profiles.iter().map(|p| p.name.clone()))
                     .collect();
 
-                let (sandbox_id, _, _) = sandbox::resolve_workspace_context()?;
+                let (sandbox_id, _, _) = sandbox::resolve_workspace_context().await?;
                 let sandbox_exists = if sandbox_id.is_empty() {
                     false
                 } else {
@@ -496,7 +496,7 @@ async fn run() -> Result<(), color_eyre::Report> {
                     crate::ui::log_info("dry run, skipping sandbox deletion");
                     return Ok(());
                 }
-                let (sandbox_id, _, _) = sandbox::resolve_workspace_context()?;
+                let (sandbox_id, _, _) = sandbox::resolve_workspace_context().await?;
                 if sandbox_id.is_empty() || sandbox_id == "tnk-config" {
                     ui::exit_with(ui::ExitCode::Usage, "must be inside a project directory");
                 }

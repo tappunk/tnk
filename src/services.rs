@@ -15,10 +15,78 @@
 use std::io::IsTerminal;
 use std::path::PathBuf;
 
+use std::io::Write;
 use std::time::{Duration, Instant};
 
 use crate::lifecycle;
+use async_trait::async_trait;
 use tokio::process::Command;
+
+#[async_trait]
+pub trait ServicesBackend: Send + Sync {
+    async fn start(&self, dry_run: bool) -> Result<(), color_eyre::Report>;
+    async fn stop(&self, dry_run: bool) -> Result<(), color_eyre::Report>;
+    async fn status(&self, output: crate::OutputFormat) -> Result<(), color_eyre::Report>;
+    async fn restart(&self, dry_run: bool) -> Result<(), color_eyre::Report>;
+    async fn delete(&self, force: bool, dry_run: bool) -> Result<(), color_eyre::Report>;
+}
+
+pub struct LimaServices;
+
+#[async_trait]
+impl ServicesBackend for LimaServices {
+    async fn start(&self, dry_run: bool) -> Result<(), color_eyre::Report> {
+        start_lima(dry_run).await
+    }
+
+    async fn stop(&self, dry_run: bool) -> Result<(), color_eyre::Report> {
+        stop_lima(dry_run).await
+    }
+
+    async fn status(&self, output: crate::OutputFormat) -> Result<(), color_eyre::Report> {
+        status_lima(output).await
+    }
+
+    async fn restart(&self, dry_run: bool) -> Result<(), color_eyre::Report> {
+        restart_lima(dry_run).await
+    }
+
+    async fn delete(&self, force: bool, dry_run: bool) -> Result<(), color_eyre::Report> {
+        delete_lima(force, dry_run).await
+    }
+}
+
+pub async fn run(action: crate::ServicesCommands) -> Result<(), color_eyre::Report> {
+    let backend = LimaServices;
+    match action {
+        crate::ServicesCommands::Start { dry_run } => backend.start(dry_run).await?,
+        crate::ServicesCommands::Stop { dry_run } => backend.stop(dry_run).await?,
+        crate::ServicesCommands::Status { output } => backend.status(output).await?,
+        crate::ServicesCommands::Restart { dry_run } => backend.restart(dry_run).await?,
+        crate::ServicesCommands::Delete { yes, dry_run } => backend.delete(yes, dry_run).await?,
+    }
+    Ok(())
+}
+
+pub async fn start(dry_run: bool) -> Result<(), color_eyre::Report> {
+    LimaServices.start(dry_run).await
+}
+
+pub async fn stop(dry_run: bool) -> Result<(), color_eyre::Report> {
+    LimaServices.stop(dry_run).await
+}
+
+pub async fn status(output: crate::OutputFormat) -> Result<(), color_eyre::Report> {
+    LimaServices.status(output).await
+}
+
+pub async fn restart(dry_run: bool) -> Result<(), color_eyre::Report> {
+    LimaServices.restart(dry_run).await
+}
+
+pub async fn delete(force: bool, dry_run: bool) -> Result<(), color_eyre::Report> {
+    LimaServices.delete(force, dry_run).await
+}
 
 async fn generate_searxng_secret() -> Result<String, color_eyre::Report> {
     const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
@@ -34,41 +102,9 @@ async fn generate_searxng_secret() -> Result<String, color_eyre::Report> {
     Ok(secret)
 }
 
-pub async fn run(action: crate::ServicesCommands) -> Result<(), color_eyre::Report> {
-    match action {
-        crate::ServicesCommands::Start { dry_run } => start(dry_run).await?,
-        crate::ServicesCommands::Stop { dry_run } => stop(dry_run).await?,
-        crate::ServicesCommands::Status { output } => status(output).await?,
-        crate::ServicesCommands::Restart { dry_run } => restart(dry_run).await?,
-        crate::ServicesCommands::Delete { yes, dry_run } => delete(yes, dry_run).await?,
-    }
-    Ok(())
-}
-
-pub async fn start(dry_run: bool) -> Result<(), color_eyre::Report> {
-    start_lima(dry_run).await
-}
-
-pub async fn stop(dry_run: bool) -> Result<(), color_eyre::Report> {
-    stop_lima(dry_run).await
-}
-
-pub async fn status(output: crate::OutputFormat) -> Result<(), color_eyre::Report> {
-    status_lima(output).await
-}
-
-pub async fn restart(dry_run: bool) -> Result<(), color_eyre::Report> {
-    restart_lima(dry_run).await
-}
-
-pub async fn delete(force: bool, dry_run: bool) -> Result<(), color_eyre::Report> {
-    delete_lima(force, dry_run).await
-}
-
 async fn limactl_output(args: &[&str]) -> Result<std::process::Output, color_eyre::Report> {
     let output = Command::new("limactl").args(args).output().await?;
     if crate::ui::is_verbose() {
-        use std::io::Write;
         let _ = std::io::stderr().write_all(&output.stdout);
         let _ = std::io::stderr().write_all(&output.stderr);
     }
@@ -143,7 +179,7 @@ base: template:default
 vmType: vz
 arch: aarch64
 cpus: 2
-memory: 4GiB
+memory: 2GiB
 disk: 20GiB
 mounts: []
 hostResolver:
@@ -308,7 +344,9 @@ async fn start_lima(dry_run: bool) -> Result<(), color_eyre::Report> {
     eprintln!("info: services machine: acquiring lifecycle lock");
     let _lock = lifecycle::acquire("services-runtime", Duration::from_secs(20)).await?;
     ensure_lima_services_instance().await?;
+
     provision_lima_services_instance().await?;
+
     crate::ui::log_info("searxng:  http://127.0.0.1:18766 (browser access)");
     crate::ui::log_info("mcp:      stdio bridge via limactl shell tnk-services");
     Ok(())
@@ -341,20 +379,6 @@ async fn stop_lima(dry_run: bool) -> Result<(), color_eyre::Report> {
     Ok(())
 }
 
-async fn is_lima_services_provisioned() -> bool {
-    let output = limactl_output(&[
-        "shell",
-        "tnk-services",
-        "--",
-        "bash",
-        "-lc",
-        crate::sandbox::shared::PROVISION_STATE_CHECK,
-    ])
-    .await;
-
-    matches!(output, Ok(out) if out.status.success())
-}
-
 async fn status_lima(output: crate::OutputFormat) -> Result<(), color_eyre::Report> {
     let exists = lima_instance_exists("tnk-services").await;
     if !exists {
@@ -363,21 +387,18 @@ async fn status_lima(output: crate::OutputFormat) -> Result<(), color_eyre::Repo
     let running = lima_instance_running("tnk-services").await;
     let status = if running { "running" } else { "stopped" };
     let searxng_status = if running { "running" } else { "stopped" };
-    let provisioned = running && is_lima_services_provisioned().await;
 
     match output {
         crate::OutputFormat::Text => {
-            eprintln!("tnk-services (lima): {}", status);
-            eprintln!("tnk-searxng (lima): {}", searxng_status);
-            eprintln!("provisioned: {}", if provisioned { "yes" } else { "no" });
+            eprintln!("services (vm): {}", status);
+            eprintln!("searxng (vm): {}", searxng_status);
         }
         crate::OutputFormat::Json | crate::OutputFormat::Ndjson => {
             let payload = serde_json::json!({
                 "name": "tnk-services",
                 "runtime": "lima",
                 "status": status,
-                "searxng": searxng_status,
-                "provisioned": provisioned
+                "searxng": searxng_status
             });
             println!("{}", serde_json::to_string(&payload)?);
         }

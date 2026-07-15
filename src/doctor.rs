@@ -17,8 +17,9 @@ use std::process::Stdio;
 
 use tokio::process::Command;
 
-fn check_default_engine_runtime_binary() -> Result<(), color_eyre::Report> {
-    let runtime = crate::config::load_blocking()?
+async fn check_default_engine_runtime_binary() -> Result<(), color_eyre::Report> {
+    let runtime = crate::config::load()
+        .await?
         .default_engine_runtime
         .unwrap_or_else(|| "llama".to_string());
 
@@ -67,8 +68,8 @@ async fn list_lima_instances() -> Result<Vec<String>, color_eyre::Report> {
         .collect())
 }
 
-fn check_config() -> Result<(), color_eyre::Report> {
-    let cfg = crate::config::load_blocking()?;
+async fn check_config() -> Result<(), color_eyre::Report> {
+    let cfg = crate::config::load().await?;
     cfg.print_resolved();
     eprintln!("ok: config loaded");
     Ok(())
@@ -114,8 +115,8 @@ async fn check_managed_instances() -> Result<(), color_eyre::Report> {
 pub async fn run() -> Result<(), color_eyre::Report> {
     eprintln!("tnk doctor");
 
-    check_default_engine_runtime_binary()?;
-    check_config()?;
+    check_default_engine_runtime_binary().await?;
+    check_config().await?;
     check_engine().await?;
     check_services().await?;
     check_locks_dir()?;

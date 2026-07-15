@@ -146,7 +146,7 @@ pub async fn start(
     audit_log: Option<String>,
 ) -> Result<(), color_eyre::Report> {
     let cfg = crate::config::load().await?;
-    let (id, project_root, _workdir) = resolve_workspace_context()?;
+    let (id, project_root, _workdir) = resolve_workspace_context().await?;
 
     let settings = resolve_profile_settings(&profile_name, &project_root).await?;
     let home = std::env::var("HOME")?;
@@ -171,7 +171,7 @@ pub async fn shell(
     audit_log: Option<String>,
 ) -> Result<(), color_eyre::Report> {
     let cfg = crate::config::load().await?;
-    let (id, project_root, _workdir) = resolve_workspace_context()?;
+    let (id, project_root, _workdir) = resolve_workspace_context().await?;
 
     let settings = resolve_profile_settings("base", &project_root).await?;
     let home = std::env::var("HOME")?;

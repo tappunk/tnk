@@ -19,7 +19,7 @@ mkdir -p "$MOCK_PROJECT"
 cleanup() {
     local exit_code=$?
 
-    if command -v container >/dev/null 2>&1 && command -v mlxcel-server >/dev/null 2>&1; then
+    if command -v limactl >/dev/null 2>&1; then
         (
             cd "$MOCK_PROJECT" >/dev/null 2>&1 || true
             cargo run --release --manifest-path "$REPO_ROOT/Cargo.toml" -- services stop >/dev/null 2>&1 || true
@@ -48,14 +48,8 @@ if ! cargo run --release -- config show >/dev/null; then
     exit 1
 fi
 
-if ! command -v container >/dev/null 2>&1; then
-    echo "[SMOKE] Skipping full lifecycle integration (container CLI not available)."
-    echo "[ OK ] GA Smoke Matrix evaluation executed successfully. System state is pristine."
-    exit 0
-fi
-
-if ! command -v mlxcel-server >/dev/null 2>&1; then
-    echo "[SMOKE] Skipping full lifecycle integration (mlxcel-server not available)."
+if ! command -v limactl >/dev/null 2>&1; then
+    echo "[SMOKE] Skipping full lifecycle integration (limactl not available)."
     echo "[ OK ] GA Smoke Matrix evaluation executed successfully. System state is pristine."
     exit 0
 fi

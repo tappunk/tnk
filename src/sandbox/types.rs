@@ -31,8 +31,11 @@ impl TerminalStateGuard {
                 continue;
             }
 
-            let mut termios: libc::termios =
-                unsafe { std::mem::MaybeUninit::zeroed().assume_init() };
+            let mut termios: libc::termios = unsafe {
+                // termios on aarch64-darwin has no padding or special init requirements;
+                // zeroed() produces a valid representation that tcgetattr overwrites on success.
+                std::mem::zeroed()
+            };
             let ok = unsafe { libc::tcgetattr(fd, &mut termios) } == 0;
             if ok {
                 fds.push((fd, termios));

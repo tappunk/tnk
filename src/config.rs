@@ -116,14 +116,14 @@ fn expand_path(path: String, home: &str) -> String {
         format!("{}/{}", home, stripped)
     } else if let Some(stripped) = path.strip_prefix('~') {
         format!("{}{}", home, stripped)
-    } else if let Some(rest) = path.strip_prefix("$HOME") {
-        format!("{}{}", home, rest)
-    } else if let Some(rest) = path.strip_prefix("${HOME}") {
-        if rest.starts_with('/') {
-            format!("{}{}", home, rest)
-        } else {
-            path
-        }
+    } else if let Some(rest) = path.strip_prefix("$HOME/") {
+        format!("{}/{}", home, rest)
+    } else if path == "$HOME" {
+        home.to_string()
+    } else if let Some(rest) = path.strip_prefix("${HOME}/") {
+        format!("{}/{}", home, rest)
+    } else if path == "${HOME}" {
+        home.to_string()
     } else {
         path
     }
@@ -325,5 +325,39 @@ mod tests {
     #[test]
     fn expand_path_preserves_relative() {
         assert_eq!(expand_path("./src".to_string(), "/home/user"), "./src");
+    }
+
+    #[test]
+    fn expand_path_dollar_home_exact() {
+        assert_eq!(expand_path("$HOME".to_string(), "/home/user"), "/home/user");
+    }
+
+    #[test]
+    fn expand_path_dollar_home_with_slash() {
+        assert_eq!(
+            expand_path("$HOME/src".to_string(), "/home/user"),
+            "/home/user/src"
+        );
+    }
+
+    #[test]
+    fn expand_path_dollar_home_no_separator() {
+        assert_eq!(expand_path("$HOMEfoo".to_string(), "/home/user"), "$HOMEfoo");
+    }
+
+    #[test]
+    fn expand_path_brace_home_exact() {
+        assert_eq!(
+            expand_path("${HOME}".to_string(), "/home/user"),
+            "/home/user"
+        );
+    }
+
+    #[test]
+    fn expand_path_brace_home_no_separator() {
+        assert_eq!(
+            expand_path("${HOME}foo".to_string(), "/home/user"),
+            "${HOME}foo"
+        );
     }
 }

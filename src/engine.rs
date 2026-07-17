@@ -306,9 +306,9 @@ async fn kill_runtime_target(pid: u32, sig: i32) {
         return;
     }
 
-    let initial_pgid = unsafe { libc::getpgid(pid as i32) };
-
     let result = tokio::task::spawn_blocking(move || {
+        let pgid = unsafe { libc::getpgid(pid as i32) };
+
         let known: Vec<&str> = SUPPORTED_RUNTIMES.iter().map(|s| s.executable).collect();
 
         let output = std::process::Command::new("ps")
@@ -320,22 +320,27 @@ async fn kill_runtime_target(pid: u32, sig: i32) {
         {
             let line = String::from_utf8_lossy(&out.stdout).trim().to_string();
             let parts: Vec<&str> = line.split_whitespace().collect();
-            if parts.len() >= 2 {
-                let ps_pgid: i32 = parts[0].parse().unwrap_or(-1);
-                let comm = parts[1];
-                let is_known = known.iter().any(|k| {
-                    comm == *k || (comm.contains('/') && comm.rsplit('/').next() == Some(*k))
-                });
-                ps_pgid > 0 && ps_pgid == initial_pgid && is_known
-            } else {
-                false
+            match (parts.first(), parts.get(1)) {
+                (Some(pgid_str), Some(&comm)) => {
+                    if let Ok(ps_pgid) = pgid_str.parse::<i32>()
+                        && ps_pgid > 0
+                    {
+                        let is_known = known.iter().any(|k| {
+                            comm == *k || (comm.contains('/') && comm.rsplit('/').next() == Some(*k))
+                        });
+                        ps_pgid == pgid && pgid > 0 && is_known
+                    } else {
+                        false
+                    }
+                }
+                _ => false,
             }
         } else {
             false
         };
 
-        if use_pgid && initial_pgid > 0 {
-            unsafe { libc::kill(-initial_pgid, sig) }
+        if use_pgid {
+            unsafe { libc::kill(-pgid, sig) }
         } else {
             unsafe { libc::kill(pid as i32, sig) }
         }

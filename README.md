@@ -30,7 +30,7 @@ Then enter a project sandbox:
 
 ```bash
 cd ~/src/myproject
-tnk sandbox start                # auto installs default provision
+tnk sandbox start                 # auto installs default provision
 tnk sandbox shell
 ```
 

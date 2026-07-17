@@ -90,15 +90,23 @@ pub async fn delete(force: bool, dry_run: bool) -> Result<(), color_eyre::Report
 
 async fn generate_searxng_secret() -> Result<String, color_eyre::Report> {
     const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-    let mut bytes = [0_u8; 32];
+    const ALPHABET_LEN: u8 = ALPHABET.len() as u8;
+    const REJECT_THRESHOLD: u16 = 256 - 256 % ALPHABET_LEN as u16;
+
     let mut source = tokio::fs::File::open("/dev/urandom").await?;
     use tokio::io::AsyncReadExt;
-    source.read_exact(&mut bytes).await?;
 
-    let secret: String = bytes
-        .iter()
-        .map(|byte| ALPHABET[usize::from(*byte) % ALPHABET.len()] as char)
-        .collect();
+    let mut secret = String::with_capacity(32);
+    loop {
+        let mut byte = [0u8; 1];
+        source.read_exact(&mut byte).await?;
+        if u16::from(byte[0]) < REJECT_THRESHOLD {
+            secret.push(ALPHABET[usize::from(byte[0] % ALPHABET_LEN)] as char);
+        }
+        if secret.len() == 32 {
+            break;
+        }
+    }
     Ok(secret)
 }
 

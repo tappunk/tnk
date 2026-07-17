@@ -140,33 +140,30 @@ pub async fn resolve_active_model_and_ctx_impl(
     home: &str,
     port: u16,
     engine_name: &str,
-) -> (String, u32) {
+) -> Result<(String, u32), color_eyre::Report> {
     let default_model = crate::config::load()
         .await
         .ok()
         .and_then(|cfg| cfg.default_engine_preset.filter(|m| !m.trim().is_empty()))
-        .filter(|m| !m.trim().is_empty())
-        .unwrap_or_else(|| {
-            crate::engine::default_model_for_runtime(engine_name)
-                .unwrap_or_else(|| {
-                    crate::ui::log_warn(&format!(
-                        "unrecognized engine runtime '{engine_name}'; using default model"
-                    ));
-                    "llama"
-                })
-                .to_string()
-        });
+        .or_else(|| crate::engine::default_model_for_runtime(engine_name).map(String::from))
+        .ok_or_else(|| {
+            color_eyre::eyre::eyre!(
+                "engine runtime '{}' has no default model configured; \
+                 set default_engine_preset in tnk.toml",
+                engine_name
+            )
+        })?;
     let preset_ctx_hint = crate::model::DEFAULT_CONTEXT_WINDOW;
 
-    let active_model_file = PathBuf::from(home).join(format!(
-        ".cache/tnk/{}",
-        crate::engine::active_preset_file_for_runtime(engine_name).unwrap_or_else(|| {
-            crate::ui::log_warn(&format!(
-                "unrecognized engine runtime '{engine_name}'; using default preset file"
-            ));
-            "active-preset-name-llama"
-        })
-    ));
+    let active_preset_file = crate::engine::active_preset_file_for_runtime(engine_name)
+        .ok_or_else(|| {
+            color_eyre::eyre::eyre!(
+                "engine runtime '{}' has no preset file mapping",
+                engine_name
+            )
+        })?;
+    let active_model_file =
+        PathBuf::from(home).join(format!(".cache/tnk/{}", active_preset_file));
     let active_model_from_file = fs::read_to_string(&active_model_file)
         .await
         .ok()
@@ -205,7 +202,7 @@ pub async fn resolve_active_model_and_ctx_impl(
         .unwrap_or(preset_ctx_hint);
     let ctx_window = std::cmp::max(model_ctx_window, preset_ctx_hint);
 
-    (active_model, ctx_window)
+    Ok((active_model, ctx_window))
 }
 
 pub async fn load_profile_manifest(

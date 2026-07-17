@@ -154,7 +154,7 @@ pub async fn start(
     let engine_name = cfg.default_engine_runtime.as_deref().unwrap_or("llama");
     let (active_model, _ctx_window) =
         crate::sandbox::shared::resolve_active_model_and_ctx_impl(&home, server_port, engine_name)
-            .await;
+            .await?;
     let runtime_envs =
         LimaBackend::runtime_env(&id, server_port, engine_name, &active_model).await?;
 
@@ -179,7 +179,7 @@ pub async fn shell(
     let engine_name = cfg.default_engine_runtime.as_deref().unwrap_or("llama");
     let (active_model, _ctx_window) =
         crate::sandbox::shared::resolve_active_model_and_ctx_impl(&home, server_port, engine_name)
-            .await;
+            .await?;
     let runtime_envs =
         LimaBackend::runtime_env(&id, server_port, engine_name, &active_model).await?;
 

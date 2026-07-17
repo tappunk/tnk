@@ -238,7 +238,7 @@ model_dir = "{home}/opt/models"
 # Default sandbox profile
 default_provision_profile = "pi"
 
-# Inference runtime: "llama"
+# Inference engine runtime identifier (e.g., "llama")
 default_engine_runtime = "llama"
 
 # Auto-start tnk services when running `tnk run`

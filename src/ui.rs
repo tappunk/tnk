@@ -128,7 +128,6 @@ pub fn exit_with(code: ExitCode, msg: &str) -> ! {
     std::process::exit(code.as_i32());
 }
 
-/// Map an error report to an exit code based on its message content.
 pub fn exit_code_for_error(err: &color_eyre::Report) -> ExitCode {
     let msg = err.to_string().to_lowercase();
     if msg.contains("outside the configured workspace root") {

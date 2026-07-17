@@ -132,9 +132,7 @@ fn sync_managed_dirs(src: &Path, dst: &Path) -> Result<(), color_eyre::Report> {
             if let Err(_e) = std::fs::rename(&src_path, &dst_path) {
                 copy_dir_contents(&src_path, &dst_path)
                     .map_err(|e| color_eyre::eyre::eyre!("failed to sync {}: {}", dir_name, e))?;
-                std::fs::remove_dir_all(&src_path).map_err(|e| {
-                    color_eyre::eyre::eyre!("failed to remove sync source {}: {}", dir_name, e)
-                })?;
+                let _ = std::fs::remove_dir_all(&src_path);
             }
         }
     }

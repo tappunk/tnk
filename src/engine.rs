@@ -876,7 +876,6 @@ pub async fn start(
     } else {
         &bind_host
     };
-    let health_timeout_secs = 1.5;
     let mut health_ok = false;
     for attempt in 0..3 {
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
@@ -894,9 +893,8 @@ pub async fn start(
     if !health_ok {
         fs::remove_file(&pid_file).await.ok();
         return Err(color_eyre::eyre::eyre!(
-            "engine pid {} spawned but did not become healthy within {}s — check {}",
+            "engine pid {} spawned but did not become healthy within 1.5s — check {}",
             pid,
-            health_timeout_secs,
             log_stderr.display()
         ));
     }

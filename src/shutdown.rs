@@ -110,12 +110,12 @@ pub async fn run(_timeout_secs: Option<u64>, dry_run: bool) -> Result<(), color_
 
     let _lock =
         crate::lifecycle::acquire("lima-lifecycle", std::time::Duration::from_secs(20)).await?;
-
     for instance in discover_lima_sandboxes().await {
         stop_lima(instance).await;
     }
-    crate::services::stop(false).await?;
+    drop(_lock);
 
+    crate::services::stop(false).await?;
     stop_engine().await;
     crate::ui::log_info("shutdown complete");
     Ok(())

@@ -295,7 +295,7 @@ pub async fn list_files(url: &HfUrl) -> Result<Vec<FileEntry>, color_eyre::Repor
     let client = reqwest::Client::new();
     let resp = client
         .get(&tree_url)
-        .header("User-Agent", "tnk/0.1.7")
+        .header("User-Agent", format!("tnk/{}", env!("CARGO_PKG_VERSION")))
         .send()
         .await
         .map_err(|e| color_eyre::eyre::eyre!("failed to query tree API: {}", e))?;
@@ -449,7 +449,7 @@ pub async fn download_file(
     let resp = if start_offset > 0 {
         client
             .get(&resolve_url)
-            .header("User-Agent", "tnk/0.1.7")
+            .header("User-Agent", format!("tnk/{}", env!("CARGO_PKG_VERSION")))
             .header("Range", format!("bytes={}-", start_offset))
             .send()
             .await
@@ -457,7 +457,7 @@ pub async fn download_file(
     } else {
         client
             .get(&resolve_url)
-            .header("User-Agent", "tnk/0.1.7")
+            .header("User-Agent", format!("tnk/{}", env!("CARGO_PKG_VERSION")))
             .send()
             .await
             .map_err(|e| color_eyre::eyre::eyre!("request failed: {}", e))?

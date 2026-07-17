@@ -803,8 +803,7 @@ impl SandboxBackend for LimaBackend {
         engine_runtime: &str,
     ) -> Result<(String, u32), color_eyre::Report> {
         let home = std::env::var("HOME")?;
-        crate::sandbox::shared::resolve_active_model_and_ctx_impl(&home, port, engine_runtime)
-            .await
+        crate::sandbox::shared::resolve_active_model_and_ctx_impl(&home, port, engine_runtime).await
     }
 }
 

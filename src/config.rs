@@ -342,7 +342,10 @@ mod tests {
 
     #[test]
     fn expand_path_dollar_home_no_separator() {
-        assert_eq!(expand_path("$HOMEfoo".to_string(), "/home/user"), "$HOMEfoo");
+        assert_eq!(
+            expand_path("$HOMEfoo".to_string(), "/home/user"),
+            "$HOMEfoo"
+        );
     }
 
     #[test]

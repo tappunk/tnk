@@ -326,7 +326,8 @@ async fn kill_runtime_target(pid: u32, sig: i32) {
                         && ps_pgid > 0
                     {
                         let is_known = known.iter().any(|k| {
-                            comm == *k || (comm.contains('/') && comm.rsplit('/').next() == Some(*k))
+                            comm == *k
+                                || (comm.contains('/') && comm.rsplit('/').next() == Some(*k))
                         });
                         ps_pgid == pgid && pgid > 0 && is_known
                     } else {

@@ -162,8 +162,7 @@ pub async fn resolve_active_model_and_ctx_impl(
                 engine_name
             )
         })?;
-    let active_model_file =
-        PathBuf::from(home).join(format!(".cache/tnk/{}", active_preset_file));
+    let active_model_file = PathBuf::from(home).join(format!(".cache/tnk/{}", active_preset_file));
     let active_model_from_file = fs::read_to_string(&active_model_file)
         .await
         .ok()

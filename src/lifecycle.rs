@@ -26,10 +26,7 @@ pub struct RuntimeLock {
 
 impl Drop for RuntimeLock {
     fn drop(&mut self) {
-        tokio::task::spawn_blocking({
-            let path = self.path.clone();
-            move || std::fs::remove_file(&path).ok()
-        });
+        std::fs::remove_file(&self.path).ok();
     }
 }
 

@@ -22,5 +22,6 @@ target/
 
 # Project files
 AGENTS.md
+.pi/
 scripts/release.sh
 tnk.code-workspace

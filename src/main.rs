@@ -350,14 +350,6 @@ async fn boot(preset: Option<String>, runtime: Option<String>) -> Result<(), col
     Ok(())
 }
 
-async fn resolve_runtime(
-    runtime_flag: Option<String>,
-    default_engine_runtime: Option<String>,
-    preset: Option<&str>,
-) -> Result<String, color_eyre::Report> {
-    engine::resolve_runtime_for_profile(runtime_flag, default_engine_runtime, preset).await
-}
-
 async fn run() -> Result<(), color_eyre::Report> {
     let cli = Cli::parse();
 
@@ -380,7 +372,7 @@ async fn run() -> Result<(), color_eyre::Report> {
                 foreground,
             } => {
                 let cfg = config::load().await?;
-                let engine_name = resolve_runtime(
+                let engine_name = engine::resolve_runtime_for_profile(
                     runtime,
                     cfg.default_engine_runtime.clone(),
                     preset.as_deref(),
@@ -391,7 +383,12 @@ async fn run() -> Result<(), color_eyre::Report> {
             }
             EngineCommands::Status { output } => {
                 let cfg = config::load().await?;
-                let _ = resolve_runtime(None, cfg.default_engine_runtime.clone(), None).await?;
+                let _ = engine::resolve_runtime_for_profile(
+                    None,
+                    cfg.default_engine_runtime.clone(),
+                    None,
+                )
+                .await?;
                 engine::status(output).await?
             }
             EngineCommands::Stop { runtime, all } => {
@@ -399,8 +396,12 @@ async fn run() -> Result<(), color_eyre::Report> {
                     engine::stop_all().await?;
                 } else {
                     let cfg = config::load().await?;
-                    let engine_name =
-                        resolve_runtime(runtime, cfg.default_engine_runtime.clone(), None).await?;
+                    let engine_name = engine::resolve_runtime_for_profile(
+                        runtime,
+                        cfg.default_engine_runtime.clone(),
+                        None,
+                    )
+                    .await?;
                     engine::stop(&engine_name).await?;
                 }
             }
@@ -410,8 +411,12 @@ async fn run() -> Result<(), color_eyre::Report> {
                 strict,
             } => {
                 let cfg = config::load().await?;
-                let engine_name =
-                    resolve_runtime(runtime, cfg.default_engine_runtime.clone(), None).await?;
+                let engine_name = engine::resolve_runtime_for_profile(
+                    runtime,
+                    cfg.default_engine_runtime.clone(),
+                    None,
+                )
+                .await?;
                 engine::presets_for_runtime(&engine_name, output, strict).await?
             }
         },

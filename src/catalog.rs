@@ -60,20 +60,16 @@ pub fn resolve_manifest(config_dir: &Path, profile_name: &str) -> Option<PathBuf
     }
     let base = manifests_dir.join("base-sandbox.yaml");
     if base.is_file() {
-        if crate::ui::is_human_output(crate::OutputFormat::Text) {
-            crate::ui::log_info(&format!(
-                "no manifest for profile '{}', falling back to base",
-                profile_name
-            ));
-        }
+        crate::ui::log_warn(&format!(
+            "no manifest for profile '{}', falling back to base",
+            profile_name
+        ));
         Some(base)
     } else {
-        if crate::ui::is_human_output(crate::OutputFormat::Text) {
-            crate::ui::log_warn(&format!(
-                "no manifest for profile '{}' and base-sandbox.yaml is missing",
-                profile_name
-            ));
-        }
+        crate::ui::log_warn(&format!(
+            "no manifest for profile '{}' and base-sandbox.yaml is missing",
+            profile_name
+        ));
         None
     }
 }

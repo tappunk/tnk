@@ -97,7 +97,7 @@ impl TnkConfig {
         println!("provision_profile {}", cfg.provision_profile);
         println!(
             "engine_runtime    {}",
-            cfg.engine_runtime.as_deref().unwrap_or("llama")
+            cfg.engine_runtime.as_deref().unwrap_or("<default>")
         );
         println!(
             "engine_preset     {}",
@@ -157,10 +157,21 @@ fn apply_env_overrides(config: &mut TnkConfig) {
         config.default_provision_profile = Some(v);
     }
     if let Ok(v) = std::env::var("TNK_ENGINE_RUNTIME") {
-        config.default_engine_runtime = Some(v);
+        if crate::engine::supports_runtime(&v) {
+            config.default_engine_runtime = Some(v);
+        } else {
+            crate::ui::log_warn(&format!(
+                "invalid TNK_ENGINE_RUNTIME='{}'; ignoring env override",
+                v
+            ));
+        }
     }
     if let Ok(v) = std::env::var("TNK_ENGINE_PRESET") {
-        config.default_engine_preset = Some(v);
+        if v.is_empty() {
+            crate::ui::log_warn("TNK_ENGINE_PRESET is empty; ignoring env override");
+        } else {
+            config.default_engine_preset = Some(v);
+        }
     }
     if let Ok(v) = std::env::var("TNK_ENGINE_BIND_HOST") {
         config.default_engine_bind_host = Some(v);

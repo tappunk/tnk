@@ -26,7 +26,8 @@ pub struct RuntimeLock {
 
 impl Drop for RuntimeLock {
     fn drop(&mut self) {
-        std::fs::remove_file(&self.path).ok();
+        let path = self.path.clone();
+        std::thread::spawn(move || std::fs::remove_file(&path).ok());
     }
 }
 

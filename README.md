@@ -29,7 +29,7 @@ tnk run                           # boot engine + services
 Then enter a project sandbox:
 
 ```bash
-cd ~/src/myproject
+cd ~/code/myproject
 tnk sandbox start                 # auto installs default provision
 tnk sandbox shell
 ```

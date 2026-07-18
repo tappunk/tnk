@@ -319,8 +319,8 @@ mod tests {
     #[test]
     fn expand_path_replaces_tilde() {
         assert_eq!(
-            expand_path("~/src".to_string(), "/home/user"),
-            "/home/user/src"
+            expand_path("~/code".to_string(), "/home/user"),
+            "/home/user/code"
         );
         assert_eq!(
             expand_path("~/opt/models".to_string(), "/home/user"),

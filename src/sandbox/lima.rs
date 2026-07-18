@@ -957,7 +957,7 @@ fn validate_workspace_root(workspace: &Path, home: &Path) -> Result<(), color_ey
     }
     if workspace == home {
         return Err(color_eyre::eyre::eyre!(
-            "security violation: workspace root cannot be the home directory; use a dedicated subdirectory (for example, ~/src)"
+            "security violation: workspace root cannot be the home directory; use a dedicated subdirectory (for example, ~/code)"
         ));
     }
     if !workspace.starts_with(home) {

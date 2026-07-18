@@ -141,12 +141,17 @@ async fn limactl_run_or_err(args: &[&str], context: &str) -> Result<(), color_ey
 }
 
 async fn lima_instance_exists(id: &str) -> bool {
-    let Some(items) = Command::new("limactl")
-        .args(["list", "--format", "{{.Name}}"])
-        .output()
-        .await
-        .ok()
-    else {
+    let output = tokio::time::timeout(
+        Duration::from_secs(15),
+        Command::new("limactl")
+            .args(["list", "--format", "{{.Name}}"])
+            .output(),
+    )
+    .await
+    .ok()
+    .and_then(Result::ok);
+
+    let Some(items) = output else {
         return false;
     };
     if !items.status.success() {
@@ -158,12 +163,16 @@ async fn lima_instance_exists(id: &str) -> bool {
 }
 
 async fn lima_instance_running(id: &str) -> bool {
-    let output = Command::new("limactl")
-        .args(["list", "--format", "{{.Status}}", id])
-        .output()
-        .await;
+    let output = tokio::time::timeout(
+        Duration::from_secs(15),
+        Command::new("limactl")
+            .args(["list", "--format", "{{.Status}}", id])
+            .output(),
+    )
+    .await
+    .ok()
+    .and_then(Result::ok);
     output
-        .ok()
         .map(|out| {
             if out.status.success() {
                 String::from_utf8_lossy(&out.stdout)

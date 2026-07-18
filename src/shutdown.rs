@@ -17,12 +17,16 @@ use tokio::process::Command as AsyncCommand;
 use crate::ui;
 
 async fn discover_lima_sandboxes() -> Vec<String> {
-    let output = AsyncCommand::new("limactl")
-        .args(["list", "--format", "{{.Name}}"])
-        .output()
-        .await
-        .ok()
-        .filter(|o| o.status.success());
+    let output = tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        AsyncCommand::new("limactl")
+            .args(["list", "--format", "{{.Name}}"])
+            .output(),
+    )
+    .await
+    .ok()
+    .and_then(Result::ok)
+    .filter(|o| o.status.success());
 
     match output {
         Some(out) => String::from_utf8_lossy(&out.stdout)

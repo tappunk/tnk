@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use crate::{config, lifecycle, ui};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use super::types::{
     TerminalStateGuard, resolve_audit_logger, shell_escape, validate_engine_runtime,
@@ -128,10 +129,16 @@ async fn instance_exists(name: &str) -> Result<bool, color_eyre::Report> {
 }
 
 async fn instance_is_running(name: &str) -> Result<bool, color_eyre::Report> {
-    let output = Command::new("limactl")
-        .args(["list", "--format", "{{.Status}}", name])
-        .output()
-        .await?;
+    let output = tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        Command::new("limactl")
+            .args(["list", "--format", "{{.Status}}", name])
+            .output(),
+    )
+    .await
+    .map_err(|_| {
+        color_eyre::eyre::eyre!("limactl list timed out after 15s for instance '{}'", name)
+    })??;
 
     if !output.status.success() {
         return Ok(false);
@@ -703,10 +710,22 @@ impl SandboxBackend for LimaBackend {
             return Ok(());
         }
 
-        let output = Command::new("limactl")
-            .args(["list", "--format", "{{.Name}}"])
-            .output()
-            .await?;
+        let output = tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            Command::new("limactl")
+                .args(["list", "--format", "{{.Name}}"])
+                .output(),
+        )
+        .await
+        .ok()
+        .and_then(Result::ok);
+
+        let Some(output) = output else {
+            if verbose {
+                eprintln!("warning: limactl list timed out or failed for cleanup");
+            }
+            return Ok(());
+        };
 
         if !output.status.success() {
             if verbose {
@@ -1060,7 +1079,12 @@ async fn delete_lima_instance(id: &str, force: bool) -> Result<(), color_eyre::R
     }
     args.push(id);
 
-    let output = Command::new("limactl").args(&args).output().await?;
+    let output = tokio::time::timeout(
+        std::time::Duration::from_secs(60),
+        Command::new("limactl").args(&args).output(),
+    )
+    .await
+    .map_err(|_| color_eyre::eyre::eyre!("limactl delete timed out after 60s for '{}'", id))??;
 
     if !output.status.success() {
         return Err(color_eyre::eyre::eyre!(
@@ -1096,13 +1120,18 @@ fn validate_named_lima_sandbox(id: &str) -> Result<(), color_eyre::Report> {
 }
 
 async fn discover_managed_lima_instances() -> Vec<String> {
-    let output = Command::new("limactl")
-        .args(["list", "--format", "{{.Name}}"])
-        .output()
-        .await;
+    let output = tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        Command::new("limactl")
+            .args(["list", "--format", "{{.Name}}"])
+            .output(),
+    )
+    .await
+    .ok()
+    .and_then(Result::ok);
 
     let stdout = match output {
-        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).to_string(),
+        Some(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).to_string(),
         _ => String::new(),
     };
 
@@ -1126,10 +1155,14 @@ async fn discover_managed_lima_instances() -> Vec<String> {
 }
 
 async fn list_lima_instances() -> Result<Vec<SandboxEntry>, color_eyre::Report> {
-    let output = Command::new("limactl")
-        .args(["list", "--format", "{{.Name}}\t{{.Status}}"])
-        .output()
-        .await?;
+    let output = tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        Command::new("limactl")
+            .args(["list", "--format", "{{.Name}}\t{{.Status}}"])
+            .output(),
+    )
+    .await
+    .map_err(|_| color_eyre::eyre::eyre!("limactl list timed out after 15s"))??;
 
     if !output.status.success() {
         return Err(color_eyre::eyre::eyre!(
@@ -1219,10 +1252,19 @@ async fn run_provision_lima(
 
     ui::log_info(&format!("provisioning: {}", script_name));
 
-    let prepare_output = Command::new("limactl")
-        .args(["shell", id, "--", "mkdir", "-p", &guest_provision_dir])
-        .output()
-        .await?;
+    let prepare_output = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        Command::new("limactl")
+            .args(["shell", id, "--", "mkdir", "-p", &guest_provision_dir])
+            .output(),
+    )
+    .await
+    .map_err(|_| {
+        color_eyre::eyre::eyre!(
+            "limactl shell timed out after 30s while preparing guest directory for '{}'",
+            script_name
+        )
+    })??;
     if !prepare_output.status.success() {
         return Err(color_eyre::eyre::eyre!(
             "failed to prepare guest provision directory for '{}'",
@@ -1230,12 +1272,21 @@ async fn run_provision_lima(
         ));
     }
 
-    let script_copy_output = Command::new("limactl")
-        .args(["copy"])
-        .arg(&host_script)
-        .arg(format!("{}:{}", id, guest_script_path))
-        .output()
-        .await?;
+    let script_copy_output = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        Command::new("limactl")
+            .args(["copy"])
+            .arg(&host_script)
+            .arg(format!("{}:{}", id, guest_script_path))
+            .output(),
+    )
+    .await
+    .map_err(|_| {
+        color_eyre::eyre::eyre!(
+            "limactl copy timed out after 30s while copying provision script for '{}'",
+            script_name
+        )
+    })??;
     if !script_copy_output.status.success() {
         return Err(color_eyre::eyre::eyre!(
             "failed to copy provision script into lima guest for '{}'",
@@ -1246,10 +1297,19 @@ async fn run_provision_lima(
     if has_lib {
         let guest_lib_dir = format!("{}/lib", guest_provision_dir);
         let guest_target_lib_dir = format!("{}:{}", id, guest_lib_dir);
-        let mkdir_output = Command::new("limactl")
-            .args(["shell", id, "--", "mkdir", "-p", &guest_lib_dir])
-            .output()
-            .await?;
+        let mkdir_output = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            Command::new("limactl")
+                .args(["shell", id, "--", "mkdir", "-p", &guest_lib_dir])
+                .output(),
+        )
+        .await
+        .map_err(|_| {
+            color_eyre::eyre::eyre!(
+                "limactl shell timed out after 30s while preparing guest lib directory for '{}'",
+                script_name
+            )
+        })??;
         if !mkdir_output.status.success() {
             return Err(color_eyre::eyre::eyre!(
                 "failed to prepare guest provision directory for '{}'",
@@ -1257,12 +1317,21 @@ async fn run_provision_lima(
             ));
         }
 
-        let lib_copy_output = Command::new("limactl")
-            .args(["copy", "--recursive"])
-            .arg(&host_lib_dir)
-            .arg(&guest_target_lib_dir)
-            .output()
-            .await?;
+        let lib_copy_output = tokio::time::timeout(
+            std::time::Duration::from_secs(60),
+            Command::new("limactl")
+                .args(["copy", "--recursive"])
+                .arg(&host_lib_dir)
+                .arg(&guest_target_lib_dir)
+                .output(),
+        )
+        .await
+        .map_err(|_| {
+            color_eyre::eyre::eyre!(
+                "limactl copy --recursive timed out after 60s for '{}'",
+                script_name
+            )
+        })??;
         if !lib_copy_output.status.success() {
             crate::ui::log_warn(
                 "limactl copy --recursive failed for provision library, falling back to tar",
@@ -1313,21 +1382,90 @@ bash {}"#,
         shell_escape(&guest_script_path),
     );
 
+    let verbose = crate::ui::is_verbose();
+    let started = std::time::Instant::now();
+
+    let mut cmd = Command::new("limactl");
+    cmd.args(["shell", id, "--", "bash", "-lc"])
+        .arg(provision_cmd)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let mut child = cmd.spawn().map_err(|e| {
+        color_eyre::eyre::eyre!("provision spawn failed for '{}': {}", script_name, e)
+    })?;
+
+    let stdout = child.stdout.take().expect("stdout is piped");
+    let stderr = child.stderr.take().expect("stderr is piped");
+
+    let script_name_clone = script_name.to_string();
+    let stdout_handle = tokio::spawn(async move {
+        let mut reader = tokio::io::BufReader::new(stdout);
+        let mut buf = vec![0u8; 8192];
+        let mut actual_stdout = tokio::io::stdout();
+        loop {
+            match reader.read_buf(&mut buf).await {
+                Ok(0) => break,
+                Ok(n) => {
+                    let _ = actual_stdout.write_all(&buf[..n]).await;
+                    let _ = actual_stdout.flush().await;
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
+    let stderr_handle = tokio::spawn(async move {
+        let mut reader = tokio::io::BufReader::new(stderr);
+        let mut buf = vec![0u8; 8192];
+        let mut actual_stderr = tokio::io::stderr();
+        loop {
+            match reader.read_buf(&mut buf).await {
+                Ok(0) => break,
+                Ok(n) => {
+                    let _ = actual_stderr.write_all(&buf[..n]).await;
+                    let _ = actual_stderr.flush().await;
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
+    let progress_handle = if verbose {
+        Some(tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                let elapsed = started.elapsed().as_secs();
+                eprintln!(
+                    "info: provisioning {} in progress ({}s elapsed)",
+                    script_name_clone, elapsed
+                );
+            }
+        }))
+    } else {
+        None
+    };
+
     let provision_status = tokio::time::timeout(
         std::time::Duration::from_secs(1800),
-        Command::new("limactl")
-            .args(["shell", id, "--", "bash", "-lc"])
-            .arg(provision_cmd)
-            .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit())
-            .status(),
+        child.wait_with_output(),
     )
     .await
     .map_err(|_| {
         color_eyre::eyre::eyre!("provision timed out for '{}' after 1800s", script_name)
-    })??;
+    })?;
 
-    if !provision_status.success() {
+    if let Some(handle) = progress_handle {
+        handle.abort();
+    }
+    let _ = stdout_handle.await;
+    let _ = stderr_handle.await;
+
+    let output = provision_status.map_err(|e| {
+        color_eyre::eyre::eyre!("provision execution failed for '{}': {}", script_name, e)
+    })?;
+
+    if !output.status.success() {
         return Err(color_eyre::eyre::eyre!(
             "provision failed for '{}'",
             script_name

@@ -50,12 +50,16 @@ async fn check_default_engine_runtime_binary() -> Result<(), color_eyre::Report>
 }
 
 async fn list_lima_instances() -> Result<Vec<String>, color_eyre::Report> {
-    let output = Command::new("limactl")
-        .args(["list", "--format", "{{.Name}}"])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .output()
-        .await?;
+    let output = tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        Command::new("limactl")
+            .args(["list", "--format", "{{.Name}}"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .output(),
+    )
+    .await
+    .map_err(|_| color_eyre::eyre::eyre!("limactl list timed out after 15s"))??;
     if !output.status.success() {
         return Ok(vec![]);
     }

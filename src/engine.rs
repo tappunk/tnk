@@ -307,44 +307,49 @@ async fn kill_runtime_target(pid: u32, sig: i32) {
     }
 
     let result = tokio::task::spawn_blocking(move || {
+        if !crate::lifecycle::is_process_alive(pid) {
+            return -1;
+        }
+
         let pgid = unsafe { libc::getpgid(pid as i32) };
+        if pgid < 0 {
+            let ret = unsafe { libc::kill(pid as i32, sig) };
+            if ret != 0 {
+                return 1;
+            }
+            return 0;
+        }
 
         let known: Vec<&str> = SUPPORTED_RUNTIMES.iter().map(|s| s.executable).collect();
 
-        let output = std::process::Command::new("ps")
-            .args(["-p", &pid.to_string(), "-o", "pgid=,comm="])
-            .output();
-
-        let use_pgid = if let Ok(out) = output
-            && out.status.success()
-        {
-            let line = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            let parts: Vec<&str> = line.split_whitespace().collect();
-            match (parts.first(), parts.get(1)) {
-                (Some(pgid_str), Some(&comm)) => {
-                    if let Ok(ps_pgid) = pgid_str.parse::<i32>()
-                        && ps_pgid > 0
-                    {
-                        let is_known = known.iter().any(|k| {
-                            comm == *k
-                                || (comm.contains('/') && comm.rsplit('/').next() == Some(*k))
-                        });
-                        ps_pgid == pgid && pgid > 0 && is_known
-                    } else {
-                        false
-                    }
-                }
-                _ => false,
+        let is_known = {
+            let mut buf = [0u8; libc::PATH_MAX as usize];
+            let ret = unsafe {
+                libc::proc_pidpath(pid as i32, buf.as_mut_ptr() as *mut _, buf.len() as u32)
+            };
+            if ret > 0 {
+                let path = std::str::from_utf8(&buf[..ret as usize])
+                    .ok()
+                    .and_then(|s| std::path::Path::new(s).file_name())
+                    .and_then(|n| n.to_str());
+                path.is_some_and(|name| known.contains(&name))
+            } else {
+                false
             }
-        } else {
-            false
         };
 
-        if use_pgid {
-            unsafe { libc::kill(-pgid, sig) }
+        if is_known && pgid > 0 {
+            let ret = unsafe { libc::kill(-pgid, sig) };
+            if ret != 0 {
+                return 1;
+            }
         } else {
-            unsafe { libc::kill(pid as i32, sig) }
+            let ret = unsafe { libc::kill(pid as i32, sig) };
+            if ret != 0 {
+                return 1;
+            }
         }
+        0
     })
     .await
     .unwrap_or_else(|e| {
@@ -516,11 +521,16 @@ async fn detect_running_model_for_runtime(spec: EngineRuntimeSpec) -> Option<Str
 }
 
 async fn list_lima_sandboxes() -> Vec<(String, String)> {
-    let output = AsyncCommand::new("limactl")
-        .args(["list", "--format", "{{.Name}}\t{{.Status}}"])
-        .output()
-        .await;
-    let Ok(out) = output else {
+    let output = tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        AsyncCommand::new("limactl")
+            .args(["list", "--format", "{{.Name}}\t{{.Status}}"])
+            .output(),
+    )
+    .await
+    .ok()
+    .and_then(Result::ok);
+    let Some(out) = output else {
         return Vec::new();
     };
     if !out.status.success() {
@@ -727,6 +737,19 @@ async fn is_running_for_runtime(spec: EngineRuntimeSpec, ps_cache: Option<&PsSna
         fs::remove_file(&pid_file).await.ok();
     }
 
+    if let Some(parent) = pid_file.parent() {
+        let starting_file = parent.join(format!("{}.starting", spec.pid_file_name));
+        if starting_file.exists() {
+            if let Ok(pid_bytes) = fs::read_to_string(&starting_file).await
+                && let Ok(pid) = pid_bytes.trim().parse::<u32>()
+                && crate::lifecycle::is_process_alive(pid)
+            {
+                return true;
+            }
+            fs::remove_file(&starting_file).await.ok();
+        }
+    }
+
     has_runtime
 }
 
@@ -864,8 +887,12 @@ pub async fn start(
         Err(e) => return Err(e.into()),
     };
 
+    let starting_file = cache_dir.join(format!("{}.starting", spec.pid_file_name));
+    fs::write(&starting_file, pid.to_string()).await.ok();
+
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     if !crate::lifecycle::is_process_alive(pid) {
+        fs::remove_file(&starting_file).await.ok();
         return Err(color_eyre::eyre::eyre!(
             "engine exited immediately after spawn (pid {})",
             pid
@@ -892,7 +919,7 @@ pub async fn start(
     }
 
     if !health_ok {
-        fs::remove_file(&pid_file).await.ok();
+        fs::remove_file(&starting_file).await.ok();
         return Err(color_eyre::eyre::eyre!(
             "engine pid {} spawned but did not become healthy within 1.5s — check {}",
             pid,
@@ -900,6 +927,7 @@ pub async fn start(
         ));
     }
 
+    fs::remove_file(&starting_file).await.ok();
     fs::write(&pid_file, pid.to_string()).await?;
     let active_model_path = cache_dir.join(spec.active_preset_file);
     fs::write(&active_model_path, &model_id).await?;
@@ -1074,21 +1102,28 @@ pub async fn status(output: crate::OutputFormat) -> Result<(), color_eyre::Repor
         }
     }
 
-    let services_running = AsyncCommand::new("limactl")
-        .args(["list", "--format", "{{.Status}}", "tnk-services"])
-        .output()
-        .await
-        .ok()
-        .filter(|out| out.status.success())
-        .map(|out| {
+    let services_running = tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        AsyncCommand::new("limactl")
+            .args(["list", "--format", "{{.Status}}", "tnk-services"])
+            .output(),
+    )
+    .await
+    .ok()
+    .and_then(Result::ok)
+    .map(|out| {
+        if out.status.success() {
             String::from_utf8_lossy(&out.stdout)
                 .trim()
                 .eq_ignore_ascii_case("running")
-        })
-        .unwrap_or(false);
+        } else {
+            false
+        }
+    })
+    .unwrap_or(false);
     if services_running {
-        print_status_row("mcp (vm)", "running", "");
-        print_status_row("searxng (vm)", "running", "");
+        print_status_row("mcp", "running", "");
+        print_status_row("searxng", "running", "");
     }
 
     for (token, status) in &list_lima_sandboxes().await {
@@ -1155,27 +1190,34 @@ pub async fn print_status() -> Result<(), color_eyre::Report> {
         print_status_row("engine", "running", &detail);
     }
 
-    let services_running = AsyncCommand::new("limactl")
-        .args(["list", "--format", "{{.Status}}", "tnk-services"])
-        .output()
-        .await
-        .ok()
-        .filter(|out| out.status.success())
-        .map(|out| {
+    let services_running = tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        AsyncCommand::new("limactl")
+            .args(["list", "--format", "{{.Status}}", "tnk-services"])
+            .output(),
+    )
+    .await
+    .ok()
+    .and_then(Result::ok)
+    .map(|out| {
+        if out.status.success() {
             String::from_utf8_lossy(&out.stdout)
                 .trim()
                 .eq_ignore_ascii_case("running")
-        })
-        .unwrap_or(false);
+        } else {
+            false
+        }
+    })
+    .unwrap_or(false);
     if services_running {
-        print_status_row("mcp (lima)", "running", "");
-        print_status_row("searxng (lima)", "running", "");
+        print_status_row("mcp (vm)", "running", "");
+        print_status_row("searxng (vm)", "running", "");
     }
 
     let active_sandboxes = list_lima_sandboxes().await;
     for (token, status) in &active_sandboxes {
         if status.eq_ignore_ascii_case("running") {
-            print_status_row(&format!("sandbox (lima) {}", token), "running", "");
+            print_status_row(&format!("sandbox {}", token), "running", "");
         }
     }
 

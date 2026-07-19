@@ -108,7 +108,9 @@ enum Commands {
         dry_run: bool,
     },
 
-    #[command(about = "Generate shell completion scripts")]
+    #[command(
+        about = "Generate shell completion scripts (source the output file; fish completions should not be piped)"
+    )]
     Completion {
         #[arg(
             value_enum,
@@ -351,7 +353,18 @@ async fn boot(preset: Option<String>, runtime: Option<String>) -> Result<(), col
 }
 
 async fn run() -> Result<(), color_eyre::Report> {
-    let cli = Cli::parse();
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(e) => {
+            let exit_code = crate::ui::clap_exit_code_for_kind(&e.kind());
+            if exit_code != 0 {
+                eprintln!("error: {}", e);
+            } else {
+                eprintln!("{}", e);
+            }
+            std::process::exit(exit_code);
+        }
+    };
 
     if cli.quiet {
         crate::ui::set_quiet();

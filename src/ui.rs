@@ -15,6 +15,8 @@
 use std::io::{self, IsTerminal, Write};
 use std::sync::atomic::{AtomicU8, Ordering};
 
+use clap::error::ErrorKind;
+
 const VERBOSITY_QUIET: u8 = 0;
 const VERBOSITY_NORMAL: u8 = 1;
 const VERBOSITY_VERBOSE: u8 = 2;
@@ -136,5 +138,65 @@ pub fn exit_code_for_error(err: &color_eyre::Report) -> ExitCode {
         ExitCode::PermissionDenied
     } else {
         ExitCode::Error
+    }
+}
+
+/// Maps a clap ErrorKind to the appropriate exit code.
+///
+/// DisplayHelp/DisplayVersion → 0 (informational)
+/// All validation/usage errors → 64 (usage error)
+/// Internal errors (Io, Format) → 1
+/// Unknown kinds → 1 (safety net)
+pub fn clap_exit_code_for_kind(kind: &ErrorKind) -> i32 {
+    match kind {
+        ErrorKind::DisplayHelp
+        | ErrorKind::DisplayVersion
+        | ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand => 0,
+        ErrorKind::UnknownArgument
+        | ErrorKind::InvalidSubcommand
+        | ErrorKind::MissingRequiredArgument
+        | ErrorKind::TooManyValues
+        | ErrorKind::TooFewValues
+        | ErrorKind::WrongNumberOfValues
+        | ErrorKind::InvalidValue
+        | ErrorKind::ValueValidation
+        | ErrorKind::ArgumentConflict
+        | ErrorKind::NoEquals
+        | ErrorKind::MissingSubcommand
+        | ErrorKind::InvalidUtf8 => 64,
+        _ => 1,
+    }
+}
+
+#[cfg(test)]
+mod clap_exit_tests {
+    use super::*;
+
+    #[test]
+    fn help_exits_zero() {
+        assert_eq!(clap_exit_code_for_kind(&ErrorKind::DisplayHelp), 0);
+    }
+
+    #[test]
+    fn version_exits_zero() {
+        assert_eq!(clap_exit_code_for_kind(&ErrorKind::DisplayVersion), 0);
+    }
+
+    #[test]
+    fn unknown_argument_exits_sixty_four() {
+        assert_eq!(clap_exit_code_for_kind(&ErrorKind::UnknownArgument), 64);
+    }
+
+    #[test]
+    fn invalid_subcommand_exits_sixty_four() {
+        assert_eq!(clap_exit_code_for_kind(&ErrorKind::InvalidSubcommand), 64);
+    }
+
+    #[test]
+    fn missing_required_exits_sixty_four() {
+        assert_eq!(
+            clap_exit_code_for_kind(&ErrorKind::MissingRequiredArgument),
+            64
+        );
     }
 }

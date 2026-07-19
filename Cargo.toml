@@ -41,7 +41,6 @@ serde_yaml = "=0.9.34"
 shell-words = "=1.1.0"
 async-trait = "=0.1.88"
 tokio-stream = { version = "=0.1.17", features = ["full"] }
-sha2 = "=0.10.9"
 
 [profile.release]
 opt-level = 3

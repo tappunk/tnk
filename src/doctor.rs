@@ -31,21 +31,23 @@ async fn check_default_engine_runtime_binary() -> Result<(), color_eyre::Report>
         )
     })?;
 
-    let status = std::process::Command::new(spec.executable)
-        .arg("--version")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
+    let status = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        Command::new(spec.executable)
+            .arg("--version")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status(),
+    )
+    .await
+    .map_err(|_| color_eyre::eyre::eyre!("{} --version timed out after 5s", spec.executable))??;
 
-    match status {
-        Ok(s) if s.success() => {
-            eprintln!("ok: {} available", spec.executable);
-            Ok(())
-        }
-        _ => {
-            eprintln!("error: {} not found", spec.executable);
-            Err(color_eyre::eyre::eyre!("{} missing", spec.executable))
-        }
+    if status.success() {
+        eprintln!("ok: {} available", spec.executable);
+        Ok(())
+    } else {
+        eprintln!("error: {} not found", spec.executable);
+        Err(color_eyre::eyre::eyre!("{} missing", spec.executable))
     }
 }
 

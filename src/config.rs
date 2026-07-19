@@ -58,7 +58,7 @@ impl TnkConfig {
             .ok_or_else(|| color_eyre::eyre::eyre!("could not resolve home directory"))?;
         let workspace_root = match self.workspace_root {
             Some(v) => expand_path(v, &home),
-            None => format!("{}/src", home),
+            None => format!("{}/code", home),
         };
         let model_dir = match self.model_dir {
             Some(v) => expand_path(v, &home),
@@ -206,22 +206,6 @@ pub async fn load() -> Result<TnkConfig, color_eyre::Report> {
     Ok(config)
 }
 
-pub fn load_blocking() -> Result<TnkConfig, color_eyre::Report> {
-    let home = std::env::var("HOME")?;
-    let config_path = PathBuf::from(&home).join(".config/tnk/tnk.toml");
-
-    let mut config = if config_path.exists() {
-        let content = fs::read_to_string(&config_path)?;
-        toml::from_str(&content)?
-    } else {
-        crate::ui::log_info("using default settings (run `tnk init` to configure)");
-        TnkConfig::default()
-    };
-
-    apply_env_overrides(&mut config);
-    Ok(config)
-}
-
 pub fn init_config(force: bool) -> Result<(), color_eyre::Report> {
     let home = std::env::var("HOME")?;
     let config_dir = PathBuf::from(&home).join(".config/tnk");
@@ -234,28 +218,27 @@ pub fn init_config(force: bool) -> Result<(), color_eyre::Report> {
     fs::create_dir_all(&config_dir)?;
     fs::set_permissions(&config_dir, fs::Permissions::from_mode(0o700))?;
 
-    let template = format!(
-        r##"# tnk configuration
+    let template = r##"# tnk configuration
 
 # API port for local inference server
 server_port = 8080
 
 # Root used for project-to-sandbox mapping (must NOT be your home directory)
-workspace_root = "{home}/src"
+workspace_root = "~/code"
 
-# Base directory for local model files
-model_dir = "{home}/opt/models"
+# Base directory for model files
+model_dir = "~/opt/models"
 
 # Default sandbox profile
 default_provision_profile = "pi"
 
-# Inference engine runtime identifier (e.g., "llama")
+# Inference runtime: "llama"
 default_engine_runtime = "llama"
 
 # Auto-start tnk services when running `tnk run`
 services_auto_start = true
 
-# Bind host for inference server (127.0.0.1 default)
+# Bind host for inference server (127.0.0.1 for localhost only, 0.0.0.0 for all interfaces)
 default_engine_bind_host = "127.0.0.1"
 
 # Preset to load when --preset is omitted from engine start.
@@ -263,8 +246,7 @@ default_engine_bind_host = "127.0.0.1"
 # Example: "llama-default" loads ~/.config/tnk/provider.d/llama-default.ini
 # default_engine_preset = "llama-default"
 
-"##
-    );
+"##;
 
     fs::write(&config_path, template)?;
     fs::set_permissions(&config_path, fs::Permissions::from_mode(0o600))?;
@@ -282,7 +264,7 @@ mod tests {
         let cfg = ResolvedConfig::resolve(&cfg).expect("resolve defaults");
 
         assert_eq!(cfg.server_port, 8080);
-        assert!(cfg.workspace_root.ends_with("/src"));
+        assert!(cfg.workspace_root.ends_with("/code"));
         assert!(cfg.model_dir.ends_with("/opt/models"));
         assert_eq!(cfg.provision_profile, "pi");
         assert!(cfg.engine_runtime.is_none());

@@ -7,314 +7,152 @@
 //     http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "IS" BASIS,
+// distributed under the License is distributed on an "AS IS" BASIS,
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
 use crate::{config, lifecycle, ui};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::process::Command;
 
 use super::types::{
     TerminalStateGuard, resolve_audit_logger, shell_escape, validate_engine_runtime,
-    validate_script_name,
+    validate_model_name, validate_mount_path, validate_script_name,
 };
 use super::{ProfileSettings, SandboxBackend, SandboxEntry};
 
-use std::fmt::Write;
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::time::Instant;
 use tokio::fs;
-use tokio::process::Command;
 
 const SAFE_ENV_ALLOWLIST: &[&str] = &["TERM", "COLORTERM", "COLUMNS", "LINES"];
 
-#[derive(Debug, Clone)]
-struct LimaProfileSettings {
-    cpus: u32,
-    memory: String,
-    disk_gib: u32,
-    workspace_guest_path: String,
+// ---- limactl helpers ----
+
+pub async fn run_limactl(
+    args: Vec<String>,
+    timeout_secs: u64,
+    context: &str,
+) -> Result<std::process::Output, color_eyre::Report> {
+    Ok(tokio::time::timeout(
+        std::time::Duration::from_secs(timeout_secs),
+        Command::new("limactl").args(args).output(),
+    )
+    .await
+    .map_err(|_| color_eyre::eyre::eyre!("{}: timed out after {}s", context, timeout_secs))??)
 }
 
-fn lima_dir() -> Result<PathBuf, color_eyre::Report> {
-    let home = std::env::var("HOME")?;
-    Ok(PathBuf::from(home).join(".lima"))
+fn escape_yq_value(s: &str) -> String {
+    let escaped = s
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('$', "\\$")
+        .replace('`', "\\`");
+    format!("\"{}\"", escaped)
 }
 
-fn lima_instance_dir(name: &str) -> Result<PathBuf, color_eyre::Report> {
-    Ok(lima_dir()?.join(name))
+fn parse_memory_gib(memory: &str) -> Option<f32> {
+    let trimmed = memory.trim();
+    if let Some(rest) = trimmed.strip_suffix("GiB") {
+        rest.trim().parse::<f32>().ok()
+    } else if let Some(rest) = trimmed.strip_suffix("MiB") {
+        rest.trim().parse::<f32>().ok().map(|v| v / 1024.0)
+    } else {
+        trimmed.parse::<f32>().ok()
+    }
 }
 
-fn yaml_quote(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "''"))
+fn build_mount_set_expr(host_path: &str, guest_path: &str, writable: bool) -> String {
+    let escaped_host = escape_yq_value(host_path);
+    let escaped_guest = escape_yq_value(guest_path);
+    format!(
+        r#".mounts |= [{{"location": {}, "mountPoint": {}, "writable": {}}}]"#,
+        escaped_host, escaped_guest, writable
+    )
 }
 
-fn generate_lima_yaml(host_mount_path: &Path, settings: &LimaProfileSettings) -> String {
-    let mut yaml = String::new();
-    let _ = writeln!(yaml, "# tnk-managed instance");
-    let _ = writeln!(yaml, "vmType: vz");
-    let _ = writeln!(yaml, "arch: aarch64");
-    let _ = writeln!(yaml, "cpus: {}", settings.cpus);
-    let _ = writeln!(yaml, "memory: {}", settings.memory);
-    let _ = writeln!(yaml, "disk: {}GiB", settings.disk_gib);
-    let _ = writeln!(yaml, "images:");
-    let _ = writeln!(
-        yaml,
-        "  - location: https://cloud-images.ubuntu.com/releases/24.04/release/ubuntu-24.04-server-cloudimg-arm64.img"
-    );
-    let _ = writeln!(yaml, "    arch: aarch64");
+fn build_start_args(id: &str, project_root: &Path, settings: &ProfileSettings) -> Vec<String> {
+    let mut args = vec![
+        "--tty=false".into(),
+        "start".into(),
+        "--name".into(),
+        id.to_string(),
+        "--vm-type=vz".into(),
+        "--network=vzNAT".into(),
+        "--mount-type=virtiofs".into(),
+        "--containerd=system".into(),
+    ];
 
-    let _ = writeln!(yaml, "mounts:");
-    let _ = writeln!(
-        yaml,
-        "  - location: {}",
-        yaml_quote(&host_mount_path.display().to_string())
-    );
-    let _ = writeln!(
-        yaml,
-        "    mountPoint: {}",
-        yaml_quote(&settings.workspace_guest_path)
-    );
-    let _ = writeln!(yaml, "    writable: true");
+    let cpus = settings.cpus.unwrap_or(4);
+    args.extend(["--cpus".into(), cpus.to_string()]);
 
-    let _ = writeln!(yaml, "provision:");
-    let _ = writeln!(yaml, "  - mode: system");
-    let _ = writeln!(yaml, "    script: |");
-    let _ = writeln!(yaml, "      #!/bin/bash");
-    let _ = writeln!(yaml, "      set -eux -o pipefail");
-    let _ = writeln!(yaml, "      export DEBIAN_FRONTEND=noninteractive");
-    let _ = writeln!(yaml, "      apt-get update -qq");
-    let _ = writeln!(
-        yaml,
-        "      apt-get install -y -qq bash curl ca-certificates sudo git rsync"
-    );
-    let _ = writeln!(yaml, "      if ! id -u tnk >/dev/null 2>&1; then");
-    let _ = writeln!(yaml, "        useradd -m -s /bin/bash tnk");
-    let _ = writeln!(yaml, "      fi");
-    let _ = writeln!(yaml, "      usermod -aG sudo tnk");
-    let _ = writeln!(yaml, "      install -d -m 755 /etc/sudoers.d");
-    let _ = writeln!(
-        yaml,
-        "      printf 'tnk ALL=(ALL) NOPASSWD:ALL\\n' >/etc/sudoers.d/tnk"
-    );
-    let _ = writeln!(yaml, "      chmod 0440 /etc/sudoers.d/tnk");
-    let _ = writeln!(yaml, "      mkdir -p /var/lib/tnk");
-    let _ = writeln!(yaml, "      touch /var/lib/tnk/lima-baseline-v2");
+    if let Some(mem_str) = &settings.memory
+        && let Some(mem_gib) = parse_memory_gib(mem_str)
+    {
+        args.extend(["--memory".into(), format!("{}", mem_gib)]);
+    }
 
-    let _ = writeln!(yaml, "ssh:");
-    let _ = writeln!(yaml, "  loadDotSSHPubKeys: false");
-    yaml
+    let host_path = project_root.display().to_string();
+    args.extend([
+        "--set".into(),
+        build_mount_set_expr(&host_path, &settings.workspace_guest_path, true),
+    ]);
+
+    args.extend(["--set".into(), ".ssh.loadDotSSHPubKeys = false".into()]);
+
+    args.push("template:ubuntu".into());
+    args
 }
 
-fn instance_yaml_path(name: &str) -> Result<PathBuf, color_eyre::Report> {
-    Ok(lima_instance_dir(name)?.join("lima.yaml"))
-}
+// ---- Instance state ----
 
-fn instance_dir(name: &str) -> Result<PathBuf, color_eyre::Report> {
-    lima_instance_dir(name)
-}
-
-fn generated_template_path(name: &str) -> Result<PathBuf, color_eyre::Report> {
-    let home = std::env::var("HOME")?;
-    Ok(PathBuf::from(home)
-        .join(".cache/tnk/lima")
-        .join(format!("{}.yaml", name)))
-}
-
-async fn instance_exists(name: &str) -> Result<bool, color_eyre::Report> {
-    Ok(instance_yaml_path(name)?.exists())
-}
-
-async fn instance_is_running(name: &str) -> Result<bool, color_eyre::Report> {
+async fn instance_exists(id: &str) -> bool {
     let output = tokio::time::timeout(
         std::time::Duration::from_secs(15),
         Command::new("limactl")
-            .args(["list", "--format", "{{.Status}}", name])
+            .args(["list", "--format", "{{.Name}}", id])
             .output(),
     )
     .await
-    .map_err(|_| {
-        color_eyre::eyre::eyre!("limactl list timed out after 15s for instance '{}'", name)
-    })??;
+    .ok()
+    .and_then(Result::ok);
 
-    if !output.status.success() {
-        return Ok(false);
+    let Some(out) = output else {
+        return false;
+    };
+    if !out.status.success() {
+        return false;
     }
-
-    let status = String::from_utf8_lossy(&output.stdout);
-    Ok(status.trim().eq_ignore_ascii_case("running"))
+    String::from_utf8_lossy(&out.stdout).trim() == id
 }
 
-async fn stale_hostagent_pids(id: &str) -> Result<Vec<u32>, color_eyre::Report> {
-    let pattern = format!("limactl hostagent .* {}$", id);
-    let output = Command::new("pgrep")
-        .args(["-f", &pattern])
-        .output()
-        .await?;
+async fn instance_is_running(id: &str) -> bool {
+    let output = tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        Command::new("limactl")
+            .args(["list", "--format", "{{.Status}}", id])
+            .output(),
+    )
+    .await
+    .ok()
+    .and_then(Result::ok);
 
-    if !output.status.success() {
-        return Ok(Vec::new());
-    }
-
-    let mut pids = Vec::new();
-    for line in String::from_utf8_lossy(&output.stdout).lines() {
-        if let Ok(pid) = line.trim().parse::<u32>() {
-            pids.push(pid);
-        }
-    }
-    Ok(pids)
+    output
+        .map(|out| {
+            if out.status.success() {
+                String::from_utf8_lossy(&out.stdout)
+                    .trim()
+                    .eq_ignore_ascii_case("running")
+            } else {
+                false
+            }
+        })
+        .unwrap_or(false)
 }
 
-async fn cleanup_stale_hostagents(id: &str) -> Result<(), color_eyre::Report> {
-    if instance_is_running(id).await? {
-        return Ok(());
-    }
-
-    let pids = stale_hostagent_pids(id).await?;
-    if pids.is_empty() {
-        return Ok(());
-    }
-
-    for pid in pids {
-        let _ = Command::new("kill")
-            .args(["-9", &pid.to_string()])
-            .output()
-            .await;
-    }
-
-    Ok(())
-}
-
-async fn create_and_start_instance(
-    id: &str,
-    host_mount_path: &Path,
-    settings: &LimaProfileSettings,
-) -> Result<(), color_eyre::Report> {
-    cleanup_stale_hostagents(id).await?;
-    let template = generate_lima_yaml(host_mount_path, settings);
-    let template_path = generated_template_path(id)?;
-    if let Some(parent) = template_path.parent() {
-        fs::create_dir_all(parent).await?;
-    }
-    fs::write(&template_path, template).await?;
-
-    if ui::is_verbose() {
-        let mut cmd = Command::new("limactl");
-        cmd.args(["--tty=false", "start", "--name", id])
-            .arg(&template_path)
-            .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit());
-
-        match tokio::time::timeout(std::time::Duration::from_secs(300), cmd.status()).await {
-            Ok(Ok(status)) => {
-                if !status.success() {
-                    return Err(color_eyre::eyre::eyre!(
-                        "failed to create/start lima instance '{}'",
-                        id
-                    ));
-                }
-            }
-            Ok(Err(err)) => return Err(err.into()),
-            Err(_) => {
-                if !instance_is_running(id).await? {
-                    return Err(color_eyre::eyre::eyre!(
-                        "timed out creating/starting lima instance '{}'",
-                        id
-                    ));
-                }
-            }
-        }
-    } else {
-        let mut cmd = Command::new("limactl");
-        cmd.args(["--tty=false", "start", "--name", id])
-            .arg(&template_path);
-
-        match tokio::time::timeout(std::time::Duration::from_secs(300), cmd.output()).await {
-            Ok(Ok(out)) => {
-                if !out.status.success() {
-                    let stderr = String::from_utf8_lossy(&out.stderr);
-                    return Err(color_eyre::eyre::eyre!(
-                        "failed to create/start lima instance '{}': {}",
-                        id,
-                        stderr.lines().take(8).collect::<Vec<_>>().join("\n")
-                    ));
-                }
-            }
-            Ok(Err(err)) => return Err(err.into()),
-            Err(_) => {
-                if !instance_is_running(id).await? {
-                    return Err(color_eyre::eyre::eyre!(
-                        "timed out creating/starting lima instance '{}'",
-                        id
-                    ));
-                }
-            }
-        }
-    }
-
-    Ok(())
-}
-
-async fn start_existing_instance(id: &str) -> Result<(), color_eyre::Report> {
-    cleanup_stale_hostagents(id).await?;
-
-    if ui::is_verbose() {
-        let mut cmd = Command::new("limactl");
-        cmd.args(["--tty=false", "start", id])
-            .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit());
-
-        match tokio::time::timeout(std::time::Duration::from_secs(240), cmd.status()).await {
-            Ok(Ok(status)) => {
-                if !status.success() {
-                    return Err(color_eyre::eyre::eyre!(
-                        "failed to start lima instance '{}'",
-                        id
-                    ));
-                }
-            }
-            Ok(Err(err)) => return Err(err.into()),
-            Err(_) => {
-                if !instance_is_running(id).await? {
-                    return Err(color_eyre::eyre::eyre!(
-                        "timed out starting lima instance '{}'",
-                        id
-                    ));
-                }
-            }
-        }
-    } else {
-        let mut cmd = Command::new("limactl");
-        cmd.args(["--tty=false", "start", id]);
-
-        match tokio::time::timeout(std::time::Duration::from_secs(240), cmd.output()).await {
-            Ok(Ok(out)) => {
-                if !out.status.success() {
-                    let stderr = String::from_utf8_lossy(&out.stderr);
-                    return Err(color_eyre::eyre::eyre!(
-                        "failed to start lima instance '{}': {}",
-                        id,
-                        stderr.lines().take(8).collect::<Vec<_>>().join("\n")
-                    ));
-                }
-            }
-            Ok(Err(err)) => return Err(err.into()),
-            Err(_) => {
-                if !instance_is_running(id).await? {
-                    return Err(color_eyre::eyre::eyre!(
-                        "timed out starting lima instance '{}'",
-                        id
-                    ));
-                }
-            }
-        }
-    }
-
-    Ok(())
-}
+// ---- LimaBackend ----
 
 pub struct LimaBackend;
 
@@ -339,34 +177,102 @@ impl SandboxBackend for LimaBackend {
 
         ui::log_info(&format!("target: {}", id));
 
-        let lima_settings = lima_settings_from_profile_settings(settings)?;
         let needs_provision = profile_name != "base";
 
-        if !instance_exists(&id).await? {
+        if !instance_exists(&id).await {
             ui::log_info("creating lima instance");
             if !ui::is_quiet() {
                 eprintln!("creating sandbox {}...", id);
             }
-            create_and_start_instance(&id, &project_root, &lima_settings).await?;
+
+            if ui::is_verbose() {
+                let status = tokio::time::timeout(
+                    std::time::Duration::from_secs(300),
+                    Command::new("limactl")
+                        .args(build_start_args(&id, &project_root, settings))
+                        .stdout(Stdio::inherit())
+                        .stderr(Stdio::inherit())
+                        .status(),
+                )
+                .await
+                .map_err(|_| {
+                    color_eyre::eyre::eyre!("timed out creating lima instance '{}' after 300s", id)
+                })??;
+
+                if !status.success() {
+                    return Err(color_eyre::eyre::eyre!(
+                        "failed to create/start lima instance '{}'",
+                        id
+                    ));
+                }
+            } else {
+                let output = run_limactl(
+                    build_start_args(&id, &project_root, settings),
+                    300,
+                    &format!("create/start {}", id),
+                )
+                .await?;
+
+                if !output.status.success() {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    return Err(color_eyre::eyre::eyre!(
+                        "failed to create/start lima instance '{}': {}",
+                        id,
+                        stderr.lines().take(8).collect::<Vec<_>>().join("\n")
+                    ));
+                }
+            }
+
             ui::log_info(&format!("started {}", id));
-        } else if !instance_is_running(&id).await? {
+        } else if !instance_is_running(&id).await {
             if !ui::is_quiet() {
                 eprintln!("starting sandbox {}...", id);
             }
-            start_existing_instance(&id).await?;
+
+            if ui::is_verbose() {
+                let status = tokio::time::timeout(
+                    std::time::Duration::from_secs(240),
+                    Command::new("limactl")
+                        .args(["--tty=false", "start", &id])
+                        .stdout(Stdio::inherit())
+                        .stderr(Stdio::inherit())
+                        .status(),
+                )
+                .await
+                .map_err(|_| {
+                    color_eyre::eyre::eyre!("timed out starting lima instance '{}' after 240s", id)
+                })??;
+
+                if !status.success() {
+                    return Err(color_eyre::eyre::eyre!(
+                        "failed to start lima instance '{}'",
+                        id
+                    ));
+                }
+            } else {
+                let output = run_limactl(
+                    vec!["--tty=false".into(), "start".into(), id.clone()],
+                    240,
+                    &format!("start {}", id),
+                )
+                .await?;
+
+                if !output.status.success() {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    return Err(color_eyre::eyre::eyre!(
+                        "failed to start lima instance '{}': {}",
+                        id,
+                        stderr.lines().take(8).collect::<Vec<_>>().join("\n")
+                    ));
+                }
+            }
+
             ui::log_info(&format!("started {}", id));
         }
 
-        let started_at = Instant::now();
-        while started_at.elapsed().as_secs() < 120 {
-            if instance_is_running(&id).await? {
-                break;
-            }
-            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-        }
-        if !instance_is_running(&id).await? {
+        if !instance_is_running(&id).await {
             return Err(color_eyre::eyre::eyre!(
-                "timed out waiting for lima instance '{}' to become running",
+                "lima instance '{}' not running after start",
                 id
             ));
         }
@@ -403,7 +309,7 @@ impl SandboxBackend for LimaBackend {
                 engine_name,
                 &active_model,
                 ctx_window,
-                &lima_settings.workspace_guest_path,
+                &settings.workspace_guest_path,
                 server_port,
             )
             .await?;
@@ -487,14 +393,84 @@ impl SandboxBackend for LimaBackend {
         let _lock =
             lifecycle::acquire("lima-lifecycle", std::time::Duration::from_secs(20)).await?;
 
-        let default_settings = lima_settings_from_profile_settings(settings)?;
-
-        if !instance_exists(&id).await? {
+        if !instance_exists(&id).await {
             ui::log_info("creating lima instance");
-            create_and_start_instance(&id, &project_root, &default_settings).await?;
+            if ui::is_verbose() {
+                let status = tokio::time::timeout(
+                    std::time::Duration::from_secs(300),
+                    Command::new("limactl")
+                        .args(build_start_args(&id, &project_root, settings))
+                        .stdout(Stdio::inherit())
+                        .stderr(Stdio::inherit())
+                        .status(),
+                )
+                .await
+                .map_err(|_| {
+                    color_eyre::eyre::eyre!("timed out creating lima instance '{}' after 300s", id)
+                })??;
+
+                if !status.success() {
+                    return Err(color_eyre::eyre::eyre!(
+                        "failed to create/start lima instance '{}'",
+                        id
+                    ));
+                }
+            } else {
+                let output = run_limactl(
+                    build_start_args(&id, &project_root, settings),
+                    300,
+                    &format!("create/start {}", id),
+                )
+                .await?;
+
+                if !output.status.success() {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    return Err(color_eyre::eyre::eyre!(
+                        "failed to create/start lima instance '{}': {}",
+                        id,
+                        stderr.lines().take(8).collect::<Vec<_>>().join("\n")
+                    ));
+                }
+            }
             ui::log_info(&format!("started {}", id));
-        } else if !instance_is_running(&id).await? {
-            start_existing_instance(&id).await?;
+        } else if !instance_is_running(&id).await {
+            if ui::is_verbose() {
+                let status = tokio::time::timeout(
+                    std::time::Duration::from_secs(240),
+                    Command::new("limactl")
+                        .args(["--tty=false", "start", &id])
+                        .stdout(Stdio::inherit())
+                        .stderr(Stdio::inherit())
+                        .status(),
+                )
+                .await
+                .map_err(|_| {
+                    color_eyre::eyre::eyre!("timed out starting lima instance '{}' after 240s", id)
+                })??;
+
+                if !status.success() {
+                    return Err(color_eyre::eyre::eyre!(
+                        "failed to start lima instance '{}'",
+                        id
+                    ));
+                }
+            } else {
+                let output = run_limactl(
+                    vec!["--tty=false".into(), "start".into(), id.clone()],
+                    240,
+                    &format!("start {}", id),
+                )
+                .await?;
+
+                if !output.status.success() {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    return Err(color_eyre::eyre::eyre!(
+                        "failed to start lima instance '{}': {}",
+                        id,
+                        stderr.lines().take(8).collect::<Vec<_>>().join("\n")
+                    ));
+                }
+            }
             ui::log_info(&format!("started {}", id));
         }
 
@@ -636,10 +612,10 @@ impl SandboxBackend for LimaBackend {
             return Ok(());
         }
 
-        return Err(color_eyre::eyre::eyre!(
+        Err(color_eyre::eyre::eyre!(
             "sandbox shell exited with code {}",
             status.code().unwrap_or(1)
-        ));
+        ))
     }
 
     async fn stop(names: Vec<String>, all: bool) -> Result<(), color_eyre::Report> {
@@ -669,7 +645,7 @@ impl SandboxBackend for LimaBackend {
 
             for id in unique {
                 validate_named_lima_sandbox(&id)?;
-                if !instance_exists(&id).await? {
+                if !instance_exists(&id).await {
                     eprintln!("warning: lima instance '{}' does not exist", id);
                     continue;
                 }
@@ -690,11 +666,11 @@ impl SandboxBackend for LimaBackend {
     }
 
     async fn exists(id: &str) -> Result<bool, color_eyre::Report> {
-        Ok(instance_exists(id).await?)
+        Ok(instance_exists(id).await)
     }
 
     async fn is_running(id: &str) -> Result<bool, color_eyre::Report> {
-        Ok(instance_is_running(id).await?)
+        Ok(instance_is_running(id).await)
     }
 
     async fn cleanup_untracked(verbose: bool) -> Result<(), color_eyre::Report> {
@@ -746,7 +722,7 @@ impl SandboxBackend for LimaBackend {
                 continue;
             }
 
-            let is_running = instance_is_running(id).await?;
+            let is_running = instance_is_running(id).await;
             if is_running {
                 if verbose {
                     eprintln!("info: skipping running untracked lima instance {}", id);
@@ -787,11 +763,6 @@ impl SandboxBackend for LimaBackend {
         .await
     }
 
-    async fn build_golden_image(profile_name: String) -> Result<(), color_eyre::Report> {
-        let _ = profile_name;
-        Ok(())
-    }
-
     async fn resolve_gateway(_id: &str) -> Result<String, color_eyre::Report> {
         Ok("host.lima.internal".to_string())
     }
@@ -825,6 +796,8 @@ impl SandboxBackend for LimaBackend {
         crate::sandbox::shared::resolve_active_model_and_ctx_impl(&home, port, engine_runtime).await
     }
 }
+
+// ---- Workspace context ----
 
 fn sanitize_project_name(name: &str) -> Option<String> {
     let sanitized: String = name
@@ -968,29 +941,6 @@ fn validate_workspace_root(workspace: &Path, home: &Path) -> Result<(), color_ey
     Ok(())
 }
 
-fn lima_settings_from_profile_settings(
-    settings: &ProfileSettings,
-) -> Result<LimaProfileSettings, color_eyre::Report> {
-    if settings.network_none {
-        return Err(color_eyre::eyre::eyre!(
-            "lima backend does not support network=none or network=restricted"
-        ));
-    }
-
-    Ok(LimaProfileSettings {
-        cpus: settings.cpus.unwrap_or(4),
-        memory: settings
-            .memory
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .unwrap_or("2GiB")
-            .to_string(),
-        disk_gib: 50,
-        workspace_guest_path: settings.workspace_guest_path.clone(),
-    })
-}
-
 async fn stop_lima_instance() -> Result<(), color_eyre::Report> {
     let _lock = lifecycle::acquire("lima-lifecycle", std::time::Duration::from_secs(20)).await?;
     let (id, _, _) = LimaBackend::resolve_id().await?;
@@ -999,11 +949,11 @@ async fn stop_lima_instance() -> Result<(), color_eyre::Report> {
 }
 
 async fn stop_lima_instance_by_id(id: &str) -> Result<(), color_eyre::Report> {
-    if !instance_exists(id).await? {
+    if !instance_exists(id).await {
         return Ok(());
     }
 
-    if !instance_is_running(id).await? {
+    if !instance_is_running(id).await {
         ui::log_info(&format!("already stopped {}", id));
         return Ok(());
     }
@@ -1019,7 +969,7 @@ async fn stop_lima_instance_by_id(id: &str) -> Result<(), color_eyre::Report> {
         Ok(Err(_)) | Err(_) => false,
     };
 
-    if graceful_ok || !instance_is_running(id).await? {
+    if graceful_ok || !instance_is_running(id).await {
         ui::log_info(&format!("stopped {}", id));
         return Ok(());
     }
@@ -1030,7 +980,7 @@ async fn stop_lima_instance_by_id(id: &str) -> Result<(), color_eyre::Report> {
     );
     tokio::time::sleep(std::time::Duration::from_secs(5)).await;
 
-    if instance_is_running(id).await? {
+    if instance_is_running(id).await {
         let force = tokio::time::timeout(
             std::time::Duration::from_secs(20),
             Command::new("limactl")
@@ -1042,7 +992,7 @@ async fn stop_lima_instance_by_id(id: &str) -> Result<(), color_eyre::Report> {
         match force {
             Ok(Ok(output)) if output.status.success() => {}
             Ok(Ok(_)) | Ok(Err(_)) | Err(_) => {
-                if instance_is_running(id).await? {
+                if instance_is_running(id).await {
                     return Err(color_eyre::eyre::eyre!(
                         "failed to stop lima instance '{}'",
                         id
@@ -1060,31 +1010,27 @@ async fn delete_lima_instance(id: &str, force: bool) -> Result<(), color_eyre::R
     let _lock = lifecycle::acquire("lima-lifecycle", std::time::Duration::from_secs(20)).await?;
 
     if !force && !std::io::stdout().is_terminal() {
-        return Err(color_eyre::eyre::eyre!(
-            "terminal required for deletion, use --yes"
-        ));
+        crate::ui::exit_with(
+            crate::ui::ExitCode::PermissionDenied,
+            "terminal required for deletion, use --yes",
+        );
     }
 
-    if !instance_exists(id).await? {
+    if !instance_exists(id).await {
         return Ok(());
     }
 
-    if instance_is_running(id).await? {
+    if instance_is_running(id).await {
         stop_lima_instance_by_id(id).await?;
     }
 
-    let mut args = vec!["delete"];
-    if force {
-        args.push("--force");
-    }
-    args.push(id);
+    let args = if force {
+        vec!["delete".into(), "--force".into(), id.to_string()]
+    } else {
+        vec!["delete".into(), id.to_string()]
+    };
 
-    let output = tokio::time::timeout(
-        std::time::Duration::from_secs(60),
-        Command::new("limactl").args(&args).output(),
-    )
-    .await
-    .map_err(|_| color_eyre::eyre::eyre!("limactl delete timed out after 60s for '{}'", id))??;
+    let output = run_limactl(args, 60, &format!("delete {}", id)).await?;
 
     if !output.status.success() {
         return Err(color_eyre::eyre::eyre!(
@@ -1092,12 +1038,6 @@ async fn delete_lima_instance(id: &str, force: bool) -> Result<(), color_eyre::R
             id
         ));
     }
-
-    let yaml_path = instance_yaml_path(id)?;
-    let _ = fs::remove_file(&yaml_path).await;
-
-    let dir = instance_dir(id)?;
-    let _ = fs::remove_dir_all(&dir).await;
 
     ui::log_info(&format!("deleted {}", id));
     Ok(())
@@ -1201,6 +1141,40 @@ async fn list_lima_instances() -> Result<Vec<SandboxEntry>, color_eyre::Report> 
     Ok(entries)
 }
 
+// ---- Provisioning ----
+
+async fn wait_for_lima_ready(id: &str, timeout_secs: u64) -> Result<(), color_eyre::Report> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+    let mut attempts = 0u32;
+    loop {
+        let output = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            Command::new("limactl")
+                .args(["shell", id, "--", "echo", "ready"])
+                .output(),
+        )
+        .await
+        .ok()
+        .and_then(Result::ok);
+
+        if output.as_ref().is_some_and(|o| o.status.success()) {
+            ui::log_info(&format!("sandbox {} ready after {} attempts", id, attempts));
+            return Ok(());
+        }
+
+        if std::time::Instant::now() >= deadline {
+            return Err(color_eyre::eyre::eyre!(
+                "sandbox '{}' did not become ready within {}s",
+                id,
+                timeout_secs
+            ));
+        }
+
+        attempts += 1;
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
+}
+
 async fn run_provision_lima(
     id: &str,
     script_name: &str,
@@ -1212,10 +1186,12 @@ async fn run_provision_lima(
 ) -> Result<(), color_eyre::Report> {
     validate_script_name(script_name)?;
     validate_engine_runtime(engine_runtime)?;
+    validate_model_name(model_name)?;
+    validate_mount_path(mount_path)?;
 
     let home = std::env::var("HOME")?;
     let host_script = PathBuf::from(&home).join(format!(
-        ".config/tnk/sandbox.d/container/provision.d/{}.sh",
+        ".config/tnk/sandbox.d/provision.d/{}.sh",
         script_name
     ));
 
@@ -1239,12 +1215,6 @@ async fn run_provision_lima(
         ));
     }
 
-    let specs_rev = crate::sandbox::shared::compute_specs_revision_hash(
-        &host_script,
-        has_lib.then_some(&host_lib_dir),
-    )
-    .await?;
-
     let guest_provision_dir = format!("/tmp/tnk-provision-{}", script_name);
     let guest_script_path = format!("{}/{}.sh", guest_provision_dir, script_name);
 
@@ -1252,41 +1222,41 @@ async fn run_provision_lima(
 
     ui::log_info(&format!("provisioning: {}", script_name));
 
-    let prepare_output = tokio::time::timeout(
-        std::time::Duration::from_secs(30),
-        Command::new("limactl")
-            .args(["shell", id, "--", "mkdir", "-p", &guest_provision_dir])
-            .output(),
+    // Wait for the instance to be fully booted and SSH-accessible
+    wait_for_lima_ready(id, 120).await?;
+
+    // Create the guest provision directory (limactl copy/rsync requires it to exist)
+    let mkdir_output = run_limactl(
+        vec![
+            "shell".into(),
+            id.to_string(),
+            "--".into(),
+            "mkdir".into(),
+            "-p".into(),
+            guest_provision_dir.clone(),
+        ],
+        30,
+        &format!("prepare provision dir {}", script_name),
     )
-    .await
-    .map_err(|_| {
-        color_eyre::eyre::eyre!(
-            "limactl shell timed out after 30s while preparing guest directory for '{}'",
-            script_name
-        )
-    })??;
-    if !prepare_output.status.success() {
+    .await?;
+    if !mkdir_output.status.success() {
         return Err(color_eyre::eyre::eyre!(
             "failed to prepare guest provision directory for '{}'",
             script_name
         ));
     }
 
-    let script_copy_output = tokio::time::timeout(
-        std::time::Duration::from_secs(30),
-        Command::new("limactl")
-            .args(["copy"])
-            .arg(&host_script)
-            .arg(format!("{}:{}", id, guest_script_path))
-            .output(),
+    // Copy script into guest
+    let script_copy_output = run_limactl(
+        vec![
+            "copy".into(),
+            host_script.display().to_string(),
+            format!("{}:{}", id, guest_script_path),
+        ],
+        30,
+        &format!("copy script {}", script_name),
     )
-    .await
-    .map_err(|_| {
-        color_eyre::eyre::eyre!(
-            "limactl copy timed out after 30s while copying provision script for '{}'",
-            script_name
-        )
-    })??;
+    .await?;
     if !script_copy_output.status.success() {
         return Err(color_eyre::eyre::eyre!(
             "failed to copy provision script into lima guest for '{}'",
@@ -1294,44 +1264,21 @@ async fn run_provision_lima(
         ));
     }
 
+    // Copy lib directory if present
     if has_lib {
         let guest_lib_dir = format!("{}/lib", guest_provision_dir);
-        let guest_target_lib_dir = format!("{}:{}", id, guest_lib_dir);
-        let mkdir_output = tokio::time::timeout(
-            std::time::Duration::from_secs(30),
-            Command::new("limactl")
-                .args(["shell", id, "--", "mkdir", "-p", &guest_lib_dir])
-                .output(),
-        )
-        .await
-        .map_err(|_| {
-            color_eyre::eyre::eyre!(
-                "limactl shell timed out after 30s while preparing guest lib directory for '{}'",
-                script_name
-            )
-        })??;
-        if !mkdir_output.status.success() {
-            return Err(color_eyre::eyre::eyre!(
-                "failed to prepare guest provision directory for '{}'",
-                script_name
-            ));
-        }
 
-        let lib_copy_output = tokio::time::timeout(
-            std::time::Duration::from_secs(60),
-            Command::new("limactl")
-                .args(["copy", "--recursive"])
-                .arg(&host_lib_dir)
-                .arg(&guest_target_lib_dir)
-                .output(),
+        let lib_copy_output = run_limactl(
+            vec![
+                "copy".into(),
+                "--recursive".into(),
+                host_lib_dir.display().to_string(),
+                format!("{}:{}", id, guest_lib_dir),
+            ],
+            60,
+            &format!("copy lib {}", script_name),
         )
-        .await
-        .map_err(|_| {
-            color_eyre::eyre::eyre!(
-                "limactl copy --recursive timed out after 60s for '{}'",
-                script_name
-            )
-        })??;
+        .await?;
         if !lib_copy_output.status.success() {
             crate::ui::log_warn(
                 "limactl copy --recursive failed for provision library, falling back to tar",
@@ -1342,7 +1289,7 @@ async fn run_provision_lima(
                     "cd {} && tar cf - . | limactl shell {} tar xf - -C {}",
                     shell_escape(&host_lib_dir.display().to_string()),
                     id,
-                    guest_target_lib_dir
+                    guest_lib_dir
                 ))
                 .output()
                 .await?;
@@ -1359,31 +1306,21 @@ async fn run_provision_lima(
     let mcp_bridge_url = shell_escape(&format!("http://{}:18765", host_gateway));
     let searxng_url = shell_escape(&format!("http://{}:18766", host_gateway));
     let provision_cmd = format!(
-        r#"set -eu -o pipefail
-export TNK_OPENAI_URL={}
-export TNK_INFERENCE_URL={}
-export TNK_MCP_BRIDGE_URL={}
-export TNK_SEARXNG_URL={}
-export TNK_MODEL_NAME={}
-export TNK_CTX_WINDOW={}
-export TNK_WORKSPACE_MOUNT={}
-export TNK_SPECS_REV={}
-export TNK_ENGINE_RUNTIME={}
-bash {}"#,
-        openai_url,
-        openai_url,
-        mcp_bridge_url,
-        searxng_url,
-        shell_escape(model_name),
-        ctx_window,
-        shell_escape(mount_path),
-        shell_escape(&specs_rev),
-        shell_escape(engine_runtime),
+        "set -eu -o pipefail\n{}\nbash {}",
+        [
+            format!("export TNK_OPENAI_URL={}", openai_url),
+            format!("export TNK_INFERENCE_URL={}", openai_url),
+            format!("export TNK_MCP_BRIDGE_URL={}", mcp_bridge_url),
+            format!("export TNK_SEARXNG_URL={}", searxng_url),
+            format!("export TNK_MODEL_NAME={}", shell_escape(model_name)),
+            format!("export TNK_CTX_WINDOW={}", ctx_window),
+            format!("export TNK_WORKSPACE_MOUNT={}", shell_escape(mount_path)),
+            format!("export TNK_ENGINE_RUNTIME={}", shell_escape(engine_runtime)),
+            format!("export TNK_SPECS_REV={}", shell_escape(&get_specs_rev())),
+        ]
+        .join("\n"),
         shell_escape(&guest_script_path),
     );
-
-    let verbose = crate::ui::is_verbose();
-    let started = std::time::Instant::now();
 
     let mut cmd = Command::new("limactl");
     cmd.args(["shell", id, "--", "bash", "-lc"])
@@ -1398,7 +1335,6 @@ bash {}"#,
     let stdout = child.stdout.take().expect("stdout is piped");
     let stderr = child.stderr.take().expect("stderr is piped");
 
-    let script_name_clone = script_name.to_string();
     let stdout_handle = tokio::spawn(async move {
         let mut reader = tokio::io::BufReader::new(stdout);
         let mut buf = vec![0u8; 8192];
@@ -1431,21 +1367,6 @@ bash {}"#,
         }
     });
 
-    let progress_handle = if verbose {
-        Some(tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
-                let elapsed = started.elapsed().as_secs();
-                eprintln!(
-                    "info: provisioning {} in progress ({}s elapsed)",
-                    script_name_clone, elapsed
-                );
-            }
-        }))
-    } else {
-        None
-    };
-
     let provision_status = tokio::time::timeout(
         std::time::Duration::from_secs(1800),
         child.wait_with_output(),
@@ -1455,9 +1376,6 @@ bash {}"#,
         color_eyre::eyre::eyre!("provision timed out for '{}' after 1800s", script_name)
     })?;
 
-    if let Some(handle) = progress_handle {
-        handle.abort();
-    }
     let _ = stdout_handle.await;
     let _ = stderr_handle.await;
 
@@ -1474,4 +1392,72 @@ bash {}"#,
 
     ui::log_info(&format!("provisioned: {}", script_name));
     Ok(())
+}
+
+fn get_specs_rev() -> String {
+    let Ok(home) = std::env::var("HOME") else {
+        return "local".to_string();
+    };
+    let specs_dir = PathBuf::from(&home).join(".config/tnk");
+    if specs_dir.join(".git").exists()
+        && let Ok(output) = std::process::Command::new("git")
+            .args(["rev-parse", "--short", "HEAD"])
+            .current_dir(&specs_dir)
+            .output()
+        && let Ok(rev) = String::from_utf8(output.stdout)
+        && let Some(rev) = rev.trim().get(..7)
+    {
+        return format!("git:{}", rev);
+    }
+    "local".to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn escape_yq_value_quotes_simple_path() {
+        assert_eq!(
+            escape_yq_value("/Users/user/code/project"),
+            "\"/Users/user/code/project\""
+        );
+    }
+
+    #[test]
+    fn escape_yq_value_escapes_special_chars() {
+        assert_eq!(escape_yq_value("path/with\"quote"), r#""path/with\"quote""#);
+        assert_eq!(escape_yq_value("path/with$var"), r#""path/with\$var""#);
+    }
+
+    #[test]
+    fn parse_memory_gib_parses_gib() {
+        assert_eq!(parse_memory_gib("2GiB"), Some(2.0));
+        assert_eq!(parse_memory_gib("4.5GiB"), Some(4.5));
+    }
+
+    #[test]
+    fn parse_memory_gib_parses_mib() {
+        assert_eq!(parse_memory_gib("2048MiB"), Some(2.0));
+    }
+
+    #[test]
+    fn parse_memory_gib_parses_bare_float() {
+        assert_eq!(parse_memory_gib("3"), Some(3.0));
+    }
+
+    #[test]
+    fn parse_memory_gib_returns_none_for_invalid() {
+        assert_eq!(parse_memory_gib("abc"), None);
+        assert_eq!(parse_memory_gib("2TB"), None);
+    }
+
+    #[test]
+    fn build_mount_set_expr_produces_valid_yq() {
+        let expr = build_mount_set_expr("/Users/user/code/project", "/workspace", true);
+        assert!(expr.starts_with(".mounts |= "));
+        assert!(expr.contains("/Users/user/code/project"));
+        assert!(expr.contains("/workspace"));
+        assert!(expr.contains("writable"));
+    }
 }

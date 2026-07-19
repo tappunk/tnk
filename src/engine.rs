@@ -35,7 +35,6 @@ pub struct EngineRuntimeSpec {
     pub active_preset_file: &'static str,
     pub log_stdout: &'static str,
     pub log_stderr: &'static str,
-    pub default_model_id: &'static str,
     pub default_bind_host: &'static str,
 }
 
@@ -54,7 +53,6 @@ const MLXCEL_SPEC: EngineRuntimeSpec = EngineRuntimeSpec {
     active_preset_file: "active-preset-name-mlxcel",
     log_stdout: "mlxcel-server.log",
     log_stderr: "mlxcel-server-err.log",
-    default_model_id: "mlx-community/Qwen3.6-35B-A3B-4bit",
     default_bind_host: "127.0.0.1",
 };
 
@@ -65,7 +63,6 @@ const LLAMA_SPEC: EngineRuntimeSpec = EngineRuntimeSpec {
     active_preset_file: "active-preset-name-llama",
     log_stdout: "llama-server.log",
     log_stderr: "llama-server-err.log",
-    default_model_id: "unsloth/Qwen3.6-35B-A3B-GGUF/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf",
     default_bind_host: "127.0.0.1",
 };
 
@@ -136,8 +133,14 @@ pub fn active_preset_file_for_runtime(runtime: &str) -> Option<&'static str> {
     runtime_spec(runtime).map(|s| s.active_preset_file)
 }
 
-pub fn default_model_for_runtime(runtime: &str) -> Option<&'static str> {
-    runtime_spec(runtime).map(|s| s.default_model_id)
+pub async fn resolve_default_preset(runtime: &str) -> Option<(String, Vec<String>)> {
+    let home = std::env::var("HOME").ok()?;
+    let path = PathBuf::from(&home)
+        .join(".config/tnk/provider.d")
+        .join(format!("{}-default.ini", runtime));
+    let kv = parse_ini_file(&path).ok()?;
+    let preset = preset_from_kv(&format!("{}-default", runtime), &kv)?;
+    Some((preset.model, preset.extra))
 }
 
 async fn resolve_bind_host(
@@ -301,7 +304,7 @@ fn pid_file_path(spec: EngineRuntimeSpec) -> Option<PathBuf> {
         .map(|h| PathBuf::from(h).join(format!(".cache/tnk/{}", spec.pid_file_name)))
 }
 
-async fn kill_runtime_target(pid: u32, sig: i32) {
+async fn kill_runtime_target(pid: u32, sig: i32, expected_pgid: Option<u32>) {
     if !crate::lifecycle::is_process_alive(pid) {
         return;
     }
@@ -338,7 +341,9 @@ async fn kill_runtime_target(pid: u32, sig: i32) {
             }
         };
 
-        if is_known && pgid > 0 {
+        let pgid_verified = expected_pgid.is_none_or(|expected| pgid == expected as i32);
+
+        if is_known && pgid > 0 && pgid_verified && crate::lifecycle::is_process_alive(pid) {
             let ret = unsafe { libc::kill(-pgid, sig) };
             if ret != 0 {
                 return 1;
@@ -378,14 +383,14 @@ async fn handle_engine_signal(child_pid: u32, shutdown_requested: &mut bool, sig
             "forwarding {} to engine pid {}",
             signal_name, child_pid
         ));
-        kill_runtime_target(child_pid, libc::SIGTERM).await;
+        kill_runtime_target(child_pid, libc::SIGTERM, None).await;
         *shutdown_requested = true;
     } else {
         eprintln!(
             "warning: second signal received, forwarding SIGKILL to engine pid {}",
             child_pid
         );
-        kill_runtime_target(child_pid, libc::SIGKILL).await;
+        kill_runtime_target(child_pid, libc::SIGKILL, None).await;
     }
 }
 
@@ -522,7 +527,7 @@ async fn detect_running_model_for_runtime(spec: EngineRuntimeSpec) -> Option<Str
 
 async fn list_lima_sandboxes() -> Vec<(String, String)> {
     let output = tokio::time::timeout(
-        std::time::Duration::from_secs(15),
+        std::time::Duration::from_secs(5),
         AsyncCommand::new("limactl")
             .args(["list", "--format", "{{.Name}}\t{{.Status}}"])
             .output(),
@@ -611,8 +616,15 @@ async fn resolve_model_id_for_runtime(
         return (expand_model_path(&p.model).await, p.extra);
     }
 
-    let model = trimmed.unwrap_or_else(|| spec.default_model_id.to_string());
-    (expand_model_path(&model).await, Vec::new())
+    if let Some((model, extra)) = resolve_default_preset(spec.name).await {
+        return (expand_model_path(&model).await, extra);
+    }
+
+    eprintln!(
+        "error: no preset found for runtime '{}'; ensure provider.d/{}-default.ini exists (run `tnk init`)",
+        spec.name, spec.name
+    );
+    std::process::exit(66)
 }
 
 fn runtime_args(model_id: &str, host: &str, port: u16, extra: &[String]) -> Vec<String> {
@@ -713,14 +725,15 @@ async fn is_running_for_runtime(spec: EngineRuntimeSpec, ps_cache: Option<&PsSna
     };
 
     if pid_file.exists() {
-        let pid_bytes = match fs::read_to_string(&pid_file).await {
+        let pid_content = match fs::read_to_string(&pid_file).await {
             Ok(b) => b,
             Err(_) => return has_runtime,
         };
 
-        let pid = match pid_bytes.trim().parse::<u32>() {
-            Ok(p) => p,
-            Err(_) => {
+        let lines: Vec<&str> = pid_content.trim().lines().collect();
+        let pid = match lines.first().and_then(|l| l.trim().parse::<u32>().ok()) {
+            Some(p) => p,
+            None => {
                 crate::ui::log_warn(&format!(
                     "corrupt pid file '{}', removing",
                     pid_file.display()
@@ -740,8 +753,9 @@ async fn is_running_for_runtime(spec: EngineRuntimeSpec, ps_cache: Option<&PsSna
     if let Some(parent) = pid_file.parent() {
         let starting_file = parent.join(format!("{}.starting", spec.pid_file_name));
         if starting_file.exists() {
-            if let Ok(pid_bytes) = fs::read_to_string(&starting_file).await
-                && let Ok(pid) = pid_bytes.trim().parse::<u32>()
+            if let Ok(content) = fs::read_to_string(&starting_file).await
+                && let Some(first_line) = content.trim().lines().next()
+                && let Ok(pid) = first_line.trim().parse::<u32>()
                 && crate::lifecycle::is_process_alive(pid)
             {
                 return true;
@@ -790,7 +804,7 @@ pub async fn start(
     if !existing_pids.is_empty() {
         eprintln!("warning: found running engine process(es), stopping before start");
         for (running_spec, pid) in existing_pids {
-            stop_pid(running_spec, pid).await;
+            stop_pid(running_spec, pid, None).await;
         }
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
     }
@@ -817,6 +831,11 @@ pub async fn start(
         let mut sighup = signal(SignalKind::hangup())?;
         let mut shutdown_requested = false;
 
+        // Foreground mode exit codes:
+        //   0    — normal completion (engine exited cleanly)
+        //   130  — Ctrl+C (SIGINT) — first signal forwards SIGTERM to child
+        //   137  — Ctrl+C × 2 (SIGKILL) — second signal forces child termination
+        //   1    — engine exited with error
         loop {
             tokio::select! {
                 maybe_status = child.wait() => {
@@ -864,19 +883,20 @@ pub async fn start(
         });
     }
 
-    let pid = match tokio::task::spawn_blocking({
+    let (pid, pgid) = match tokio::task::spawn_blocking({
         let mut cmd = cmd;
-        move || -> Result<u32, std::io::Error> {
+        move || -> Result<(u32, u32), std::io::Error> {
             let child = cmd.spawn()?;
             let pid = child.id();
+            let pgid = unsafe { libc::getpgid(pid as i32) } as u32;
             drop(child);
-            Ok(pid)
+            Ok((pid, pgid))
         }
     })
     .await
     .map_err(|e| color_eyre::eyre::eyre!("spawn blocking task panicked: {e}"))?
     {
-        Ok(pid) => pid,
+        Ok((p, pg)) => (p, pg),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             return Err(color_eyre::eyre::eyre!(
                 "{} executable not found in PATH (expected command: '{}')",
@@ -888,7 +908,9 @@ pub async fn start(
     };
 
     let starting_file = cache_dir.join(format!("{}.starting", spec.pid_file_name));
-    fs::write(&starting_file, pid.to_string()).await.ok();
+    fs::write(&starting_file, format!("{}\n{}\n", pid, pgid))
+        .await
+        .ok();
 
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     if !crate::lifecycle::is_process_alive(pid) {
@@ -900,42 +922,59 @@ pub async fn start(
     }
 
     let health_host = if bind_host == "0.0.0.0" {
-        "127.0.0.1"
+        "127.0.0.1".to_string()
     } else {
-        &bind_host
+        bind_host
     };
-    let mut health_ok = false;
-    for attempt in 0..3 {
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-        if model::verify_health(health_host, port).await {
-            health_ok = true;
-            break;
+    let health_stderr = log_stderr.clone();
+    let health_pid_file = pid_file.clone();
+    let health_starting_file = starting_file.clone();
+    let health_active_model_path = cache_dir.join(spec.active_preset_file);
+    let health_model_id = model_id.clone();
+    let health_pid = pid;
+    let health_pgid = pgid;
+
+    tokio::spawn(async move {
+        let mut health_ok = false;
+        for _attempt in 0..3 {
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            if model::verify_health(&health_host, port).await {
+                health_ok = true;
+                break;
+            }
         }
-        eprintln!(
-            "engine health probe attempt {}/3 pending ({}s remaining)",
-            attempt + 1,
-            (3 - attempt) as f64 * 0.5
-        );
-    }
 
-    if !health_ok {
-        fs::remove_file(&starting_file).await.ok();
-        return Err(color_eyre::eyre::eyre!(
-            "engine pid {} spawned but did not become healthy within 1.5s — check {}",
-            pid,
-            log_stderr.display()
-        ));
-    }
+        if health_ok {
+            fs::remove_file(&health_starting_file).await.ok();
+            fs::write(
+                &health_pid_file,
+                format!("{}\n{}\n", health_pid, health_pgid),
+            )
+            .await
+            .ok();
+            fs::write(&health_active_model_path, &health_model_id)
+                .await
+                .ok();
+        } else {
+            fs::remove_file(&health_starting_file).await.ok();
+            eprintln!(
+                "warning: engine pid {} did not become healthy — check {}",
+                health_pid,
+                health_stderr.display()
+            );
+        }
+    });
 
-    fs::remove_file(&starting_file).await.ok();
-    fs::write(&pid_file, pid.to_string()).await?;
-    let active_model_path = cache_dir.join(spec.active_preset_file);
-    fs::write(&active_model_path, &model_id).await?;
     crate::ui::log_info(&format!("started pid {}", pid));
     Ok(())
 }
 
 pub async fn stop(runtime: &str) -> Result<(), color_eyre::Report> {
+    let _engine_lock = crate::lifecycle::acquire("engine", Duration::from_secs(20)).await?;
+    stop_nolock(runtime).await
+}
+
+async fn stop_nolock(runtime: &str) -> Result<(), color_eyre::Report> {
     let spec = runtime_spec(runtime).ok_or_else(|| {
         color_eyre::eyre::eyre!(
             "unsupported engine runtime '{}' (supported: {})",
@@ -944,29 +983,33 @@ pub async fn stop(runtime: &str) -> Result<(), color_eyre::Report> {
         )
     })?;
 
-    let _engine_lock = crate::lifecycle::acquire("engine", Duration::from_secs(20)).await?;
     let home = std::env::var("HOME")?;
     let cache_dir = PathBuf::from(&home).join(".cache/tnk");
     let pid_file = cache_dir.join(spec.pid_file_name);
 
-    let mut target_pids = Vec::new();
+    let mut target_pids: Vec<(u32, Option<u32>)> = Vec::new();
     if pid_file.exists()
-        && let Ok(pid_bytes) = fs::read_to_string(&pid_file).await
-        && let Ok(pid) = pid_bytes.trim().parse::<u32>()
+        && let Ok(pid_content) = fs::read_to_string(&pid_file).await
     {
-        if is_runtime_pid(spec, pid).await {
-            target_pids.push(pid);
-        } else {
-            eprintln!(
-                "warning: stale pid file for non-engine process {}, removing",
-                pid
-            );
+        let lines: Vec<&str> = pid_content.trim().lines().collect();
+        if let Some(pid_str) = lines.first()
+            && let Ok(pid) = pid_str.trim().parse::<u32>()
+        {
+            let expected_pgid: Option<u32> = lines.get(1).and_then(|l| l.trim().parse().ok());
+            if is_runtime_pid(spec, pid).await {
+                target_pids.push((pid, expected_pgid));
+            } else {
+                eprintln!(
+                    "warning: stale pid file for non-engine process {}, removing",
+                    pid
+                );
+            }
         }
     }
 
     for pid in list_runtime_pids(spec).await {
-        if !target_pids.contains(&pid) {
-            target_pids.push(pid);
+        if !target_pids.iter().any(|(p, _)| *p == pid) {
+            target_pids.push((pid, None));
         }
     }
 
@@ -975,11 +1018,18 @@ pub async fn stop(runtime: &str) -> Result<(), color_eyre::Report> {
         return Ok(());
     }
 
-    for pid in target_pids {
-        stop_pid(spec, pid).await;
+    for (pid, pgid) in target_pids {
+        stop_pid(spec, pid, pgid).await;
     }
 
     fs::remove_file(&pid_file).await.ok();
+    Ok(())
+}
+
+pub async fn stop_all_nolock() -> Result<(), color_eyre::Report> {
+    for spec in SUPPORTED_RUNTIMES {
+        stop_nolock(spec.name).await?;
+    }
     Ok(())
 }
 
@@ -990,13 +1040,13 @@ pub async fn stop_all() -> Result<(), color_eyre::Report> {
     Ok(())
 }
 
-async fn stop_pid(spec: EngineRuntimeSpec, pid: u32) {
+async fn stop_pid(spec: EngineRuntimeSpec, pid: u32, expected_pgid: Option<u32>) {
     if !is_runtime_pid(spec, pid).await {
         return;
     }
 
     crate::ui::log_info(&format!("stopping engine pid {}", pid));
-    kill_runtime_target(pid, libc::SIGTERM).await;
+    kill_runtime_target(pid, libc::SIGTERM, expected_pgid).await;
 
     let mut died = false;
     for _ in 0..15 {
@@ -1014,7 +1064,7 @@ async fn stop_pid(spec: EngineRuntimeSpec, pid: u32) {
             "warning: sigterm failed for engine pid {}, escalating to sigkill",
             pid
         );
-        kill_runtime_target(pid, libc::SIGKILL).await;
+        kill_runtime_target(pid, libc::SIGKILL, expected_pgid).await;
         crate::ui::log_info(&format!("killed engine pid {}", pid));
     }
 }
@@ -1102,31 +1152,35 @@ pub async fn status(output: crate::OutputFormat) -> Result<(), color_eyre::Repor
         }
     }
 
-    let services_running = tokio::time::timeout(
-        std::time::Duration::from_secs(15),
+    let services_future = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
         AsyncCommand::new("limactl")
             .args(["list", "--format", "{{.Status}}", "tnk-services"])
             .output(),
-    )
-    .await
-    .ok()
-    .and_then(Result::ok)
-    .map(|out| {
-        if out.status.success() {
-            String::from_utf8_lossy(&out.stdout)
-                .trim()
-                .eq_ignore_ascii_case("running")
-        } else {
-            false
-        }
-    })
-    .unwrap_or(false);
+    );
+    let sandboxes_future = list_lima_sandboxes();
+
+    let (services_result, sandboxes) = tokio::join!(services_future, sandboxes_future);
+
+    let services_running = services_result
+        .ok()
+        .and_then(Result::ok)
+        .map(|out| {
+            if out.status.success() {
+                String::from_utf8_lossy(&out.stdout)
+                    .trim()
+                    .eq_ignore_ascii_case("running")
+            } else {
+                false
+            }
+        })
+        .unwrap_or(false);
     if services_running {
         print_status_row("mcp", "running", "");
         print_status_row("searxng", "running", "");
     }
 
-    for (token, status) in &list_lima_sandboxes().await {
+    for (token, status) in &sandboxes {
         if status == "Running" {
             let label = format!("sandbox {}", token);
             print_status_row(&label, status, "");
@@ -1153,7 +1207,7 @@ fn print_status_row(label: &str, state: &str, detail: &str) {
 }
 
 fn print_runtime_status(runtime: &str, model_id: &str, is_running: bool, configured: bool) {
-    let label = format!("engine {}", runtime);
+    let label = format!("engine ({})", runtime);
     if !configured {
         print_status_row(&label, "stopped", "");
     } else if is_running {
@@ -1190,32 +1244,35 @@ pub async fn print_status() -> Result<(), color_eyre::Report> {
         print_status_row("engine", "running", &detail);
     }
 
-    let services_running = tokio::time::timeout(
-        std::time::Duration::from_secs(15),
+    let services_future = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
         AsyncCommand::new("limactl")
             .args(["list", "--format", "{{.Status}}", "tnk-services"])
             .output(),
-    )
-    .await
-    .ok()
-    .and_then(Result::ok)
-    .map(|out| {
-        if out.status.success() {
-            String::from_utf8_lossy(&out.stdout)
-                .trim()
-                .eq_ignore_ascii_case("running")
-        } else {
-            false
-        }
-    })
-    .unwrap_or(false);
+    );
+    let sandboxes_future = list_lima_sandboxes();
+
+    let (services_result, sandboxes) = tokio::join!(services_future, sandboxes_future);
+
+    let services_running = services_result
+        .ok()
+        .and_then(Result::ok)
+        .map(|out| {
+            if out.status.success() {
+                String::from_utf8_lossy(&out.stdout)
+                    .trim()
+                    .eq_ignore_ascii_case("running")
+            } else {
+                false
+            }
+        })
+        .unwrap_or(false);
     if services_running {
         print_status_row("mcp (vm)", "running", "");
         print_status_row("searxng (vm)", "running", "");
     }
 
-    let active_sandboxes = list_lima_sandboxes().await;
-    for (token, status) in &active_sandboxes {
+    for (token, status) in &sandboxes {
         if status.eq_ignore_ascii_case("running") {
             print_status_row(&format!("sandbox {}", token), "running", "");
         }

@@ -25,7 +25,6 @@ use std::path::{Path, PathBuf};
 
 #[derive(serde::Deserialize, Debug, Clone, Default)]
 pub struct SandboxManifest {
-    pub image: Option<String>,
     pub resources: Option<ResourceLimits>,
     pub mounts: Option<HashMap<String, String>>,
     pub security: Option<SecurityCaps>,
@@ -40,7 +39,6 @@ pub struct ResourceLimits {
 #[derive(serde::Deserialize, Debug, Clone, Default)]
 pub struct SecurityCaps {
     pub network: Option<String>,
-    pub workspace_mode: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -56,8 +54,6 @@ pub struct ProfileSettings {
     pub memory: Option<String>,
     pub network_none: bool,
     pub workspace_guest_path: String,
-    pub image: String,
-    pub uses_golden_image: bool,
 }
 
 pub use lima::LimaBackend;
@@ -109,8 +105,6 @@ pub trait SandboxBackend: Sized {
         port: u16,
         settings: &ProfileSettings,
     ) -> Result<(), color_eyre::Report>;
-
-    async fn build_golden_image(profile_name: String) -> Result<(), color_eyre::Report>;
 
     async fn resolve_gateway(id: &str) -> Result<String, color_eyre::Report>;
 

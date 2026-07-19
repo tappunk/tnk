@@ -26,7 +26,7 @@ pub struct Profile {
 pub async fn list_profiles(config_dir: &Path) -> Result<Vec<Profile>, color_eyre::Report> {
     let mut profiles = Vec::new();
 
-    let provision_dir = config_dir.join("sandbox.d/container/provision.d");
+    let provision_dir = config_dir.join("sandbox.d/provision.d");
     if provision_dir.is_dir() {
         let mut entries = fs::read_dir(&provision_dir).await?;
         while let Some(entry) = entries.next_entry().await? {
@@ -53,7 +53,7 @@ pub async fn list_profiles(config_dir: &Path) -> Result<Vec<Profile>, color_eyre
 }
 
 pub fn resolve_manifest(config_dir: &Path, profile_name: &str) -> Option<PathBuf> {
-    let manifests_dir = config_dir.join("sandbox.d/container/manifests");
+    let manifests_dir = config_dir.join("sandbox.d/manifests");
     let profile_specific = manifests_dir.join(format!("{}.yaml", profile_name));
     if profile_specific.is_file() {
         return Some(profile_specific);

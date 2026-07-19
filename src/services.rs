@@ -12,10 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::io::IsTerminal;
+use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
-
-use std::io::Write;
 use std::time::{Duration, Instant};
 
 use crate::lifecycle;
@@ -185,60 +183,22 @@ async fn lima_instance_running(id: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn lima_services_template() -> String {
-    let provision = crate::sandbox::shared::BASELINE_PROVISION_SCRIPT
-        .lines()
-        .map(|line| format!("      {line}\n"))
-        .collect::<String>();
-    format!(
-        "\
-base: template:default
-vmType: vz
-arch: aarch64
-cpus: 2
-memory: 2GiB
-disk: 20GiB
-mounts: []
-hostResolver:
-  enabled: true
-provision:
-  - mode: system
-    script: |
-{provision}portForwards:
-  - guestIP: 127.0.0.1
-    guestPort: 18766
-    hostIP: 127.0.0.1
-    hostPort: 18766
-  - guestIP: 127.0.0.1
-    guestPort: 18765
-    hostIP: 127.0.0.1
-    hostPort: 18765
-ssh:
-  loadDotSSHPubKeys: false
-"
-    )
-}
-
-async fn wait_for_lima_user(
-    id: &str,
-    user: &str,
-    timeout: Duration,
-) -> Result<(), color_eyre::Report> {
+async fn wait_for_services_ready(id: &str, timeout: Duration) -> Result<(), color_eyre::Report> {
     let started = Instant::now();
     loop {
         let check = tokio::time::timeout(
-            Duration::from_secs(15),
-            limactl_output(&["shell", id, "--", "bash", "-lc", &format!("id -u {}", user)]),
+            Duration::from_secs(10),
+            limactl_output(&["shell", id, "--", "bash", "-lc", "id -u"]),
         )
         .await;
 
         match check {
             Ok(Ok(out)) if out.status.success() => return Ok(()),
-            Ok(Ok(_)) => {}  // shell failed, retry
-            Ok(Err(_)) => {} // limactl error, retry
+            Ok(Ok(_)) => {}
+            Ok(Err(_)) => {}
             Err(_) => {
                 crate::ui::log_verbose(&format!(
-                    "lima shell check timed out after 15s for instance '{}'",
+                    "lima shell check timed out after 10s for instance '{}'",
                     id
                 ));
             }
@@ -246,8 +206,7 @@ async fn wait_for_lima_user(
 
         if started.elapsed() >= timeout {
             return Err(color_eyre::eyre::eyre!(
-                "timed out waiting for lima user '{}' in instance '{}' after {}s",
-                user,
+                "timed out waiting for lima instance '{}' to be ready after {}s",
                 id,
                 timeout.as_secs()
             ));
@@ -264,28 +223,33 @@ async fn ensure_lima_services_instance() -> Result<(), color_eyre::Report> {
             "info: creating services instance '{}' (this can take a few minutes)",
             id
         );
-        let home = std::env::var("HOME")?;
-        let template_path = PathBuf::from(home)
-            .join(".cache/tnk/lima")
-            .join("tnk-services.yaml");
-        if let Some(parent) = template_path.parent() {
-            tokio::fs::create_dir_all(parent).await?;
-        }
-        tokio::fs::write(&template_path, lima_services_template()).await?;
 
-        let template_arg = template_path.to_string_lossy().to_string();
         limactl_run_or_err(
-            &["--tty=false", "start", "--name", id, &template_arg],
+            &[
+                "--tty=false",
+                "start",
+                "--name",
+                id,
+                "--vm-type=vz",
+                // Self-contained VM: no host filesystem mounts. SearXNG runs as a
+                // nerdctl container pulled from Docker Hub; the provision script
+                // is copied in once, then runs entirely inside the guest.
+                "--mount-none",
+                "--containerd=system",
+                "--cpus=2",
+                "--memory=2",
+                "--port-forward=18765:18765",
+                "--port-forward=18766:18766",
+                "--set",
+                ".ssh.loadDotSSHPubKeys = false",
+                "template:ubuntu",
+            ],
             "failed to create/start services instance",
         )
         .await?;
-        eprintln!("info: services instance '{}' is running", id);
-        eprintln!("info: waiting for baseline provisioning to create user 'tnk'");
-        wait_for_lima_user(id, "tnk", Duration::from_secs(180)).await?;
-        return Ok(());
-    }
 
-    if !lima_instance_running(id).await {
+        eprintln!("info: services instance '{}' is running", id);
+    } else if !lima_instance_running(id).await {
         eprintln!("info: starting existing services instance '{}'", id);
         limactl_run_or_err(
             &["--tty=false", "start", id],
@@ -295,16 +259,13 @@ async fn ensure_lima_services_instance() -> Result<(), color_eyre::Report> {
         eprintln!("info: services instance '{}' is running", id);
     }
 
-    eprintln!("info: waiting for baseline provisioning to create user 'tnk'");
-    wait_for_lima_user(id, "tnk", Duration::from_secs(180)).await?;
-
+    wait_for_services_ready(id, Duration::from_secs(180)).await?;
     Ok(())
 }
 
 async fn provision_lima_services_instance() -> Result<(), color_eyre::Report> {
     let home = std::env::var("HOME")?;
-    let script =
-        PathBuf::from(&home).join(".config/tnk/sandbox.d/container/provision.d/tnk-services.sh");
+    let script = PathBuf::from(&home).join(".config/tnk/sandbox.d/provision.d/tnk-services.sh");
     let searxng_secret = generate_searxng_secret().await?;
     let run_searxng = format!(
         "cat >/tmp/tnk-searxng-settings.yml <<'EOF'\nuse_default_settings: true\nsearch:\n  formats:\n    - html\n    - json\nserver:\n  limiter: false\nEOF\nnerdctl rm -f tnk-searxng >/dev/null 2>&1 || true\nnerdctl run -d --name tnk-searxng -p 127.0.0.1:18766:8080 -e SEARXNG_SECRET={} -v /tmp/tnk-searxng-settings.yml:/etc/searxng/settings.yml:ro docker.io/searxng/searxng:latest >/dev/null 2>&1 || true",
@@ -344,7 +305,7 @@ async fn provision_lima_services_instance() -> Result<(), color_eyre::Report> {
             "--",
             "bash",
             "-lc",
-            "sudo -u tnk env TNK_SEARXNG_URL=http://127.0.0.1:18766 bash /tmp/tnk-services.sh",
+            "env TNK_SEARXNG_URL=http://127.0.0.1:18766 bash /tmp/tnk-services.sh",
         ],
         "failed to provision services instance",
     )
@@ -451,9 +412,10 @@ async fn delete_lima(force: bool, dry_run: bool) -> Result<(), color_eyre::Repor
         return Ok(());
     }
     if !force && !std::io::stdout().is_terminal() {
-        return Err(color_eyre::eyre::eyre!(
-            "terminal required for deletion, use --yes"
-        ));
+        crate::ui::exit_with(
+            crate::ui::ExitCode::PermissionDenied,
+            "terminal required for deletion, use --yes",
+        );
     }
     delete_lima_instance("tnk-services").await?;
     delete_lima_instance("tnk-searxng").await?;

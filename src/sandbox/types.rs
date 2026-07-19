@@ -147,6 +147,20 @@ pub fn validate_env_value(value: &str, field: &str) -> Result<(), color_eyre::Re
     Ok(())
 }
 
+pub fn validate_mount_path(path: &str) -> Result<(), color_eyre::Report> {
+    if !path.starts_with('/') {
+        return Err(color_eyre::eyre::eyre!(
+            "invalid mount path: must start with '/'"
+        ));
+    }
+    if path.chars().any(|c| c.is_control()) {
+        return Err(color_eyre::eyre::eyre!(
+            "invalid mount path: contains control characters"
+        ));
+    }
+    Ok(())
+}
+
 pub fn validate_model_name(name: &str) -> Result<(), color_eyre::Report> {
     if name.is_empty() {
         return Err(color_eyre::eyre::eyre!("invalid model name: empty"));

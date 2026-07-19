@@ -90,7 +90,7 @@ async fn stop_engine() {
 
     if crate::engine::is_running().await {
         had_any = true;
-        if let Err(err) = crate::engine::stop_all().await {
+        if let Err(err) = crate::engine::stop_all_nolock().await {
             eprintln!("warning: failed to stop inference engine: {}", err);
         }
     }
@@ -99,7 +99,7 @@ async fn stop_engine() {
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         if crate::engine::is_running().await {
             eprintln!("warning: inference engine still running after stop request; retrying");
-            if let Err(err) = crate::engine::stop_all().await {
+            if let Err(err) = crate::engine::stop_all_nolock().await {
                 eprintln!("warning: second stop_all attempt failed: {}", err);
             }
         }
@@ -112,12 +112,16 @@ pub async fn run(_timeout_secs: Option<u64>, dry_run: bool) -> Result<(), color_
         return Ok(());
     }
 
-    let _lock =
+    let _lima_lock =
         crate::lifecycle::acquire("lima-lifecycle", std::time::Duration::from_secs(20)).await?;
+    let _engine_lock =
+        crate::lifecycle::acquire("engine", std::time::Duration::from_secs(20)).await?;
+    let _services_lock =
+        crate::lifecycle::acquire("services-runtime", std::time::Duration::from_secs(20)).await?;
+
     for instance in discover_lima_sandboxes().await {
         stop_lima(instance).await;
     }
-    drop(_lock);
 
     crate::services::stop(false).await?;
     stop_engine().await;

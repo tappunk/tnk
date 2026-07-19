@@ -1,22 +1,7 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use tokio::fs;
-
-pub const BASELINE_PROVISION_SCRIPT: &str = "\
-#!/usr/bin/env bash
-set -eu
-export DEBIAN_FRONTEND=noninteractive
-apt-get update -qq
-apt-get install -y -qq bash ca-certificates curl nodejs npm sudo
-if ! id -u tnk >/dev/null 2>&1; then
-  useradd -m -s /bin/bash tnk
-fi
-usermod -aG sudo tnk
-install -d -m 755 /etc/sudoers.d
-printf 'tnk ALL=(ALL) NOPASSWD:ALL\\n' >/etc/sudoers.d/tnk
-chmod 0440 /etc/sudoers.d/tnk
-";
 
 pub fn parse_explicit_env(input: &str) -> Result<(String, String), color_eyre::Report> {
     let Some((key, value)) = input.split_once('=') else {
@@ -87,72 +72,25 @@ pub fn runtime_env_summary(envs: &[(String, String)]) -> serde_json::Value {
     serde_json::Value::Object(map)
 }
 
-pub async fn collect_regular_files_recursive(
-    root: &Path,
-) -> Result<Vec<PathBuf>, color_eyre::Report> {
-    let mut files = Vec::new();
-    let mut dirs = vec![root.to_path_buf()];
-
-    while let Some(dir) = dirs.pop() {
-        let mut entries = fs::read_dir(&dir).await?;
-        while let Some(entry) = entries.next_entry().await? {
-            let path = entry.path();
-            let metadata = fs::metadata(&path).await?;
-            if metadata.is_dir() {
-                dirs.push(path);
-            } else {
-                files.push(path);
-            }
-        }
-    }
-
-    Ok(files)
-}
-
-pub async fn compute_specs_revision_hash(
-    script_path: &Path,
-    lib_dir: Option<&Path>,
-) -> Result<String, color_eyre::Report> {
-    use sha2::{Digest, Sha256};
-
-    let mut files = vec![script_path.to_path_buf()];
-    if let Some(dir) = lib_dir {
-        files.extend(collect_regular_files_recursive(dir).await?);
-    }
-    files.sort();
-
-    let mut first_pass_output = String::new();
-    for file in &files {
-        let content = fs::read(file).await?;
-        let mut hasher = Sha256::new();
-        hasher.update(&content);
-        let digest = hasher.finalize();
-        first_pass_output.push_str(&format!("{:x}  {}\n", digest, file.display()));
-    }
-
-    let mut final_hasher = Sha256::new();
-    final_hasher.update(first_pass_output.as_bytes());
-    let final_digest = final_hasher.finalize();
-    Ok(format!("{:x}", final_digest))
-}
-
 pub async fn resolve_active_model_and_ctx_impl(
     home: &str,
     port: u16,
     engine_name: &str,
 ) -> Result<(String, u32), color_eyre::Report> {
-    let default_model = crate::config::load()
-        .await
-        .ok()
-        .and_then(|cfg| cfg.default_engine_preset.filter(|m| !m.trim().is_empty()))
-        .or_else(|| crate::engine::default_model_for_runtime(engine_name).map(String::from))
-        .ok_or_else(|| {
-            color_eyre::eyre::eyre!(
-                "engine runtime '{}' has no default model configured; \
-                 set default_engine_preset in tnk.toml",
-                engine_name
-            )
-        })?;
+    let default_model = if let Ok(cfg) = crate::config::load().await
+        && let Some(name) = cfg.default_engine_preset.filter(|m| !m.trim().is_empty())
+    {
+        name
+    } else if let Some((model, _extra)) = crate::engine::resolve_default_preset(engine_name).await {
+        model
+    } else {
+        return Err(color_eyre::eyre::eyre!(
+            "engine runtime '{}' has no default model configured; \
+             set default_engine_preset in tnk.toml or ensure provider.d/{}-default.ini exists",
+            engine_name,
+            engine_name
+        ));
+    };
     let preset_ctx_hint = crate::model::DEFAULT_CONTEXT_WINDOW;
 
     let active_preset_file = crate::engine::active_preset_file_for_runtime(engine_name)

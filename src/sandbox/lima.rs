@@ -29,8 +29,6 @@ use tokio::fs;
 
 const SAFE_ENV_ALLOWLIST: &[&str] = &["TERM", "COLORTERM", "COLUMNS", "LINES"];
 
-// ---- limactl helpers ----
-
 pub async fn run_limactl(
     args: Vec<String>,
     timeout_secs: u64,
@@ -106,8 +104,6 @@ fn build_start_args(id: &str, project_root: &Path, settings: &ProfileSettings) -
     args
 }
 
-// ---- Instance state ----
-
 async fn instance_exists(id: &str) -> bool {
     let output = tokio::time::timeout(
         std::time::Duration::from_secs(15),
@@ -151,8 +147,6 @@ async fn instance_is_running(id: &str) -> bool {
         })
         .unwrap_or(false)
 }
-
-// ---- LimaBackend ----
 
 pub struct LimaBackend;
 
@@ -797,8 +791,6 @@ impl SandboxBackend for LimaBackend {
     }
 }
 
-// ---- Workspace context ----
-
 fn sanitize_project_name(name: &str) -> Option<String> {
     let sanitized: String = name
         .chars()
@@ -1141,8 +1133,6 @@ async fn list_lima_instances() -> Result<Vec<SandboxEntry>, color_eyre::Report> 
     Ok(entries)
 }
 
-// ---- Provisioning ----
-
 async fn wait_for_lima_ready(id: &str, timeout_secs: u64) -> Result<(), color_eyre::Report> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
     let mut attempts = 0u32;
@@ -1222,10 +1212,8 @@ async fn run_provision_lima(
 
     ui::log_info(&format!("provisioning: {}", script_name));
 
-    // Wait for the instance to be fully booted and SSH-accessible
     wait_for_lima_ready(id, 120).await?;
 
-    // Create the guest provision directory (limactl copy/rsync requires it to exist)
     let mkdir_output = run_limactl(
         vec![
             "shell".into(),
@@ -1246,7 +1234,6 @@ async fn run_provision_lima(
         ));
     }
 
-    // Copy script into guest
     let script_copy_output = run_limactl(
         vec![
             "copy".into(),
@@ -1264,7 +1251,6 @@ async fn run_provision_lima(
         ));
     }
 
-    // Copy lib directory if present
     if has_lib {
         let guest_lib_dir = format!("{}/lib", guest_provision_dir);
 

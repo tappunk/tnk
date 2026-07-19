@@ -141,12 +141,6 @@ pub fn exit_code_for_error(err: &color_eyre::Report) -> ExitCode {
     }
 }
 
-/// Maps a clap ErrorKind to the appropriate exit code.
-///
-/// DisplayHelp/DisplayVersion → 0 (informational)
-/// All validation/usage errors → 64 (usage error)
-/// Internal errors (Io, Format) → 1
-/// Unknown kinds → 1 (safety net)
 pub fn clap_exit_code_for_kind(kind: &ErrorKind) -> i32 {
     match kind {
         ErrorKind::DisplayHelp

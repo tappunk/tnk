@@ -1,7 +1,7 @@
 <div align="center">
   <img src="https://raw.githubusercontent.com/tappunk/.github/refs/heads/main/assets/tnk.webp" alt="tnk" width="280"/>
 
-# tnk
+# tnk (experimental)
 
 **Zero-trust sandbox for local inference and secure AI coding agent runtimes.**
 

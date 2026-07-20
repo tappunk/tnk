@@ -20,7 +20,8 @@
 ![tnk demo](https://raw.githubusercontent.com/tappunk/.github/refs/heads/main/assets/_sandbox-oc-pi.gif)
 
 ```bash
-brew install tappunk/tnk/tnk      # or: cargo install tnk
+brew tap tappunk/tap              # or: cargo install tnk
+brew install tappunk/tap/tnk
 tnk init                          # populate config from tnk-specs
 tnk config init                   # create ~/.config/tnk/tnk.toml
 tnk run                           # boot engine + services

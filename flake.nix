@@ -13,7 +13,7 @@
     {
       packages.aarch64-darwin.default = pkgs.rustPlatform.buildRustPackage {
         pname = "tnk";
-        version = "0.1.28";
+        version = "0.1.29";
         src = ./.;
 
         cargoLock = {

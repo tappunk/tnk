@@ -118,11 +118,11 @@ async fn limactl_output(args: &[&str]) -> Result<std::process::Output, color_eyr
 }
 
 async fn limactl_run_or_err(args: &[&str], context: &str) -> Result<(), color_eyre::Report> {
-    let output = tokio::time::timeout(Duration::from_secs(300), limactl_output(args)).await;
+    let output = tokio::time::timeout(Duration::from_secs(600), limactl_output(args)).await;
     let output = match output {
         Ok(result) => result?,
         Err(_) => {
-            return Err(color_eyre::eyre::eyre!("{}: timed out after 300s", context));
+            return Err(color_eyre::eyre::eyre!("{}: timed out after 600s", context));
         }
     };
 

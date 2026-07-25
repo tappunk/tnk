@@ -50,7 +50,7 @@ The agent runs in an isolated sandbox that mounts only the project workspace. Ho
 ```bash
 tnk run              # boot engine + services
 tnk sandbox shell    # enter project sandbox
-tnk shutdown --yes   # tear down everything
+tnk shutdown         # tear down everything
 tnk doctor           # health checks
 tnk config show      # inspect effective config
 ```

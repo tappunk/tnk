@@ -58,6 +58,10 @@ pub fn resolve_manifest(config_dir: &Path, profile_name: &str) -> Option<PathBuf
     if profile_specific.is_file() {
         return Some(profile_specific);
     }
+    let profile_sandbox = manifests_dir.join(format!("{}-sandbox.yaml", profile_name));
+    if profile_sandbox.is_file() {
+        return Some(profile_sandbox);
+    }
     let base = manifests_dir.join("base-sandbox.yaml");
     if base.is_file() {
         crate::ui::log_warn(&format!(

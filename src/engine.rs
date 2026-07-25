@@ -1286,9 +1286,7 @@ pub async fn print_status() -> Result<(), color_eyre::Report> {
     if !printed_any {
         let has_config = std::env::var("HOME")
             .ok()
-            .map(|h| {
-                PathBuf::from(h).join(".config/tnk/provider.d").is_dir()
-            })
+            .map(|h| PathBuf::from(h).join(".config/tnk/provider.d").is_dir())
             .unwrap_or(false);
 
         if has_config {

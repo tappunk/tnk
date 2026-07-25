@@ -503,9 +503,10 @@ async fn run() -> Result<(), color_eyre::Report> {
             } => sandbox::shell(profile, command, no_tty, env, audit_log).await?,
             SandboxCommands::Stop { all, name } => {
                 if all && !name.is_empty() {
-                    return Err(color_eyre::eyre::eyre!(
-                        "--all cannot be combined with --name"
-                    ));
+                    ui::exit_with(
+                        ui::ExitCode::Usage,
+                        "--all cannot be combined with --name",
+                    );
                 }
                 sandbox::stop(name, all).await?
             }

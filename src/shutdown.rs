@@ -45,6 +45,34 @@ async fn discover_lima_sandboxes() -> Vec<String> {
 }
 
 async fn stop_lima(name: String) {
+    let output = tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        AsyncCommand::new("limactl")
+            .args(["list", "--format", "{{.Status}}", &name])
+            .output(),
+    )
+    .await
+    .ok()
+    .and_then(Result::ok);
+
+    let is_running = output
+        .as_ref()
+        .map(|out| {
+            if out.status.success() {
+                String::from_utf8_lossy(&out.stdout)
+                    .trim()
+                    .eq_ignore_ascii_case("running")
+            } else {
+                false
+            }
+        })
+        .unwrap_or(false);
+
+    if !is_running {
+        ui::log_info(&format!("already stopped {}", name));
+        return;
+    }
+
     let graceful = tokio::time::timeout(
         std::time::Duration::from_secs(60),
         AsyncCommand::new("limactl").args(["stop", &name]).output(),

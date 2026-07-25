@@ -1323,10 +1323,10 @@ async fn run_provision_lima(
 
     let stdout_handle = tokio::spawn(async move {
         let mut reader = tokio::io::BufReader::new(stdout);
-        let mut buf = vec![0u8; 8192];
+        let mut buf = [0u8; 8192];
         let mut actual_stdout = tokio::io::stdout();
         loop {
-            match reader.read_buf(&mut buf).await {
+            match reader.read(&mut buf).await {
                 Ok(0) => break,
                 Ok(n) => {
                     let _ = actual_stdout.write_all(&buf[..n]).await;
@@ -1339,10 +1339,10 @@ async fn run_provision_lima(
 
     let stderr_handle = tokio::spawn(async move {
         let mut reader = tokio::io::BufReader::new(stderr);
-        let mut buf = vec![0u8; 8192];
+        let mut buf = [0u8; 8192];
         let mut actual_stderr = tokio::io::stderr();
         loop {
-            match reader.read_buf(&mut buf).await {
+            match reader.read(&mut buf).await {
                 Ok(0) => break,
                 Ok(n) => {
                     let _ = actual_stderr.write_all(&buf[..n]).await;

@@ -1114,6 +1114,9 @@ async fn list_lima_instances() -> Result<Vec<SandboxEntry>, color_eyre::Report> 
             if !id.starts_with("tnk-") {
                 return None;
             }
+            if id == "tnk-services" || id == "tnk-searxng" {
+                return None;
+            }
             let status = {
                 let raw = parts[1].trim();
                 if raw.is_empty() {

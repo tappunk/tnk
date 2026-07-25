@@ -360,6 +360,20 @@ async fn stop_lima(dry_run: bool) -> Result<(), color_eyre::Report> {
 async fn status_lima(output: crate::OutputFormat) -> Result<(), color_eyre::Report> {
     let exists = lima_instance_exists("tnk-services").await;
     if !exists {
+        match output {
+            crate::OutputFormat::Text => {
+                eprintln!("services (vm): not configured");
+            }
+            crate::OutputFormat::Json | crate::OutputFormat::Ndjson => {
+                let payload = serde_json::json!({
+                    "name": "tnk-services",
+                    "runtime": "lima",
+                    "status": "not_configured",
+                    "searxng": "not_configured"
+                });
+                println!("{}", serde_json::to_string(&payload)?);
+            }
+        }
         return Ok(());
     }
     let running = lima_instance_running("tnk-services").await;

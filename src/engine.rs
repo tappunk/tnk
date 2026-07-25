@@ -1228,6 +1228,8 @@ pub async fn print_status() -> Result<(), color_eyre::Report> {
         .and_then(|cfg| cfg.server_port)
         .unwrap_or(8080);
 
+    let mut printed_any = false;
+
     if let Some(spec) = running_runtime().await {
         let model = detect_running_model_for_runtime(spec)
             .await
@@ -1242,6 +1244,7 @@ pub async fn print_status() -> Result<(), color_eyre::Report> {
             model
         };
         print_status_row("engine", "running", &detail);
+        printed_any = true;
     }
 
     let services_future = tokio::time::timeout(
@@ -1270,11 +1273,28 @@ pub async fn print_status() -> Result<(), color_eyre::Report> {
     if services_running {
         print_status_row("mcp (vm)", "running", "");
         print_status_row("searxng (vm)", "running", "");
+        printed_any = true;
     }
 
     for (token, status) in &sandboxes {
         if status.eq_ignore_ascii_case("running") {
             print_status_row(&format!("sandbox {}", token), "running", "");
+            printed_any = true;
+        }
+    }
+
+    if !printed_any {
+        let has_config = std::env::var("HOME")
+            .ok()
+            .map(|h| {
+                PathBuf::from(h).join(".config/tnk/provider.d").is_dir()
+            })
+            .unwrap_or(false);
+
+        if has_config {
+            eprintln!("tnk: configured, stopped");
+        } else {
+            eprintln!("tnk: not configured");
         }
     }
 

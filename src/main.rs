@@ -35,22 +35,17 @@ use crate::config::ConfigCommands;
     name = "tnk",
     version,
     author,
-    about = "Zero-trust sandbox for local inference and secure AI coding agent runtimes",
-    long_about = "Zero-trust sandbox for local inference and secure AI coding agent runtimes.",
+    about = "Local inference sandbox",
+    long_about = "Zero-trust sandbox for local inference and AI agent runtimes.",
     arg_required_else_help = false,
     propagate_version = true,
     trailing_var_arg = true
 )]
 struct Cli {
-    #[arg(
-        short,
-        long,
-        global = true,
-        help = "Suppress non-error operational output"
-    )]
+    #[arg(short, long, global = true, help = "quiet")]
     quiet: bool,
 
-    #[arg(short, long, global = true, help = "Show detailed operational logs")]
+    #[arg(short, long, global = true, help = "verbose")]
     verbose: bool,
 
     #[command(subcommand)]
@@ -67,198 +62,162 @@ pub enum OutputFormat {
 
 #[derive(Subcommand)]
 enum Commands {
-    #[command(about = "Manage inference engine")]
+    #[command(about = "inference engine")]
     Engine {
         #[command(subcommand)]
         action: EngineCommands,
     },
 
-    #[command(about = "Manage project sandboxes")]
+    #[command(about = "project sandboxes")]
     Sandbox {
         #[command(subcommand)]
         action: SandboxCommands,
     },
 
-    #[command(about = "Start inference engine and tnk services runtime")]
+    #[command(about = "start runtime")]
     Run {
-        #[arg(long, help = "Preset name to use (must match a file in provider.d/)")]
+        #[arg(long, help = "preset")]
         preset: Option<String>,
-        #[arg(long, help = "Inference engine runtime")]
+        #[arg(long, help = "runtime")]
         runtime: Option<String>,
-        #[arg(short = 'n', long, help = "Preview actions without side effects")]
+        #[arg(short = 'n', long, help = "dry-run")]
         dry_run: bool,
     },
 
-    #[command(about = "Shutdown all managed components")]
+    #[command(about = "shutdown")]
     Shutdown {
-        #[arg(
-            long,
-            value_name = "SECONDS",
-            help = "Timeout per component in seconds (default: 30)"
-        )]
+        #[arg(long, value_name = "SECONDS", help = "timeout")]
         timeout: Option<u64>,
-        #[arg(short = 'n', long, help = "Preview actions without side effects")]
+        #[arg(short = 'n', long, help = "dry-run")]
         dry_run: bool,
     },
 
-    #[command(
-        about = "Generate shell completion scripts (source the output file; fish completions should not be piped)"
-    )]
+    #[command(about = "shell completions")]
     Completion {
-        #[arg(
-            value_enum,
-            help = "Target shell environment for completion generation"
-        )]
+        #[arg(value_enum, help = "shell")]
         shell: Shell,
     },
 
-    #[command(about = "Initialize tnk from upstream specs")]
+    #[command(about = "init")]
     Init {
-        #[arg(long, help = "Custom Git URL for tnk-specs repository source override")]
+        #[arg(long, help = "git url")]
         git_url: Option<String>,
-        #[arg(
-            long,
-            help = "Force overwrite existing configurations inside ~/.config/tnk/"
-        )]
+        #[arg(long, help = "force")]
         force: bool,
     },
 
-    #[command(about = "Manage tnk config")]
+    #[command(about = "config")]
     Config {
         #[command(subcommand)]
         action: ConfigCommands,
     },
 
-    #[command(about = "Run diagnostics and health checks")]
+    #[command(about = "diagnostics")]
     Doctor,
 
-    #[command(about = "Download models from Hugging Face Hub")]
+    #[command(about = "download models")]
     Download {
-        #[arg(help = "Hugging Face URL, hf:// URI, or repo ID (namespace/name)")]
+        #[arg(help = "url")]
         url: String,
 
         #[arg(short, long, value_enum, default_value_t = OutputFormat::Text)]
         output: OutputFormat,
 
-        #[arg(short = 'n', long, help = "Preview files without downloading")]
+        #[arg(short = 'n', long, help = "dry-run")]
         dry_run: bool,
 
-        #[arg(long, help = "Custom revision (branch, tag, or commit)")]
+        #[arg(long, help = "revision")]
         revision: Option<String>,
 
-        #[arg(long, default_value_t = 4, help = "Maximum concurrent downloads")]
+        #[arg(long, default_value_t = 4, help = "workers")]
         workers: usize,
 
-        #[arg(long, help = "Overwrite existing files even if sizes match")]
+        #[arg(long, help = "force")]
         force: bool,
     },
 }
 
 #[derive(Subcommand)]
 pub enum EngineCommands {
-    #[command(about = "Start inference engine runtime")]
+    #[command(about = "start")]
     Start {
-        #[arg(long, help = "Inference engine runtime")]
+        #[arg(long, help = "runtime")]
         runtime: Option<String>,
-        #[arg(long, help = "Preset name to load (must match a file in provider.d/)")]
+        #[arg(long, help = "preset")]
         preset: Option<String>,
-        #[arg(long, help = "Bind host for inference server")]
+        #[arg(long, help = "bind host")]
         bind_host: Option<String>,
-        #[arg(
-            long,
-            help = "Port to bind the inference engine server (default from tnk.toml or 8080)"
-        )]
+        #[arg(long, help = "engine server port")]
         engine_server_port: Option<u16>,
-        #[arg(
-            long,
-            help = "Run in foreground (blocking mode) instead of as a background daemon"
-        )]
+        #[arg(long, help = "foreground")]
         foreground: bool,
     },
-    #[command(about = "Stop inference engine runtime")]
+    #[command(about = "stop")]
     Stop {
-        #[arg(long, help = "Inference engine runtime")]
+        #[arg(long, help = "runtime")]
         runtime: Option<String>,
-        #[arg(long, help = "Stop all running engines")]
+        #[arg(long, help = "all")]
         all: bool,
     },
-    #[command(about = "Show engine status")]
+    #[command(about = "status")]
     Status {
         #[arg(short, long, value_enum, default_value_t = OutputFormat::Text)]
         output: OutputFormat,
     },
-    #[command(about = "List configured model profiles")]
+    #[command(about = "list presets")]
     Presets {
-        #[arg(long, help = "Inference engine runtime")]
+        #[arg(long, help = "runtime")]
         runtime: Option<String>,
         #[arg(short, long, value_enum, default_value_t = OutputFormat::Text)]
         output: OutputFormat,
-        #[arg(long, help = "Only show presets with an explicit runtime field")]
+        #[arg(long, help = "strict")]
         strict: bool,
     },
 }
 
 #[derive(Subcommand)]
 pub enum SandboxCommands {
-    #[command(about = "Start sandbox for current project")]
+    #[command(about = "start")]
     Start {
-        #[arg(
-            long,
-            help = "Profile to apply (run without --profile to list available profiles)!"
-        )]
+        #[arg(long, help = "profile")]
         profile: Option<String>,
-        #[arg(long, help = "Write session audit logs to this NDJSON file path")]
+        #[arg(long, help = "audit log file")]
         audit_log: Option<String>,
-        #[arg(long, alias = "enter", help = "Attach interactive shell after start")]
+        #[arg(long, alias = "enter", help = "shell")]
         shell: bool,
     },
-    #[command(
-        about = "Execute an interactive shell or a custom command inside the project sandbox"
-    )]
+    #[command(about = "shell")]
     Shell {
-        #[arg(long, help = "Ensure this profile is applied before attaching")]
+        #[arg(long, help = "profile")]
         profile: Option<String>,
-        #[arg(
-            short,
-            long,
-            help = "Execute a non-interactive command instead of opening a login shell"
-        )]
+        #[arg(short, long, help = "command")]
         command: Option<String>,
-        #[arg(long, help = "Bypass TTY requirements for non-interactive automation")]
+        #[arg(long, help = "no-tty")]
         no_tty: bool,
-        #[arg(
-            short,
-            long,
-            action = ArgAction::Append,
-            help = "Explicit environment additions in KEY=VALUE form"
-        )]
+        #[arg(short, long, action = ArgAction::Append, help = "env")]
         env: Vec<String>,
-        #[arg(long, help = "Write session audit logs to this NDJSON file path")]
+        #[arg(long, help = "audit log file")]
         audit_log: Option<String>,
     },
-    #[command(about = "Stop active sandbox, selected sandboxes, or all sandboxes")]
+    #[command(about = "stop")]
     Stop {
-        #[arg(long, help = "Stop all managed project sandboxes")]
+        #[arg(long, help = "all")]
         all: bool,
-        #[arg(
-            long,
-            action = ArgAction::Append,
-            help = "Stop a specific sandbox by name (repeatable)"
-        )]
+        #[arg(long, action = ArgAction::Append, help = "name")]
         name: Vec<String>,
     },
-    #[command(about = "Delete active sandbox")]
+    #[command(about = "delete")]
     Delete {
-        #[arg(short, long, help = "Skip confirmation prompt")]
+        #[arg(short, long, help = "yes")]
         yes: bool,
-        #[arg(short = 'n', long, help = "Preview actions without side effects")]
+        #[arg(short = 'n', long, help = "dry-run")]
         dry_run: bool,
     },
-    #[command(about = "List sandbox instances")]
+    #[command(about = "list")]
     Ls {
         #[arg(short, long, value_enum, default_value_t = OutputFormat::Text)]
         output: OutputFormat,
-        #[arg(short, long, help = "Output only sandbox names (one per line)")]
+        #[arg(short, long, help = "quiet")]
         quiet: bool,
     },
 }

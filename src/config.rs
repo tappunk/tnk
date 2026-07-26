@@ -31,7 +31,7 @@ pub struct ResolvedConfig {
 #[derive(Subcommand)]
 pub enum ConfigCommands {
     Init {
-        #[arg(long, help = "Force overwrite existing tnk.toml")]
+        #[arg(long, help = "force")]
         force: bool,
     },
     Show,

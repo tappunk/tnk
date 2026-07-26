@@ -22,7 +22,7 @@ cleanup() {
     if command -v limactl >/dev/null 2>&1; then
         (
             cd "$MOCK_PROJECT" >/dev/null 2>&1 || true
-            cargo run --release --manifest-path "$REPO_ROOT/Cargo.toml" -- services stop >/dev/null 2>&1 || true
+            cargo run --release --manifest-path "$REPO_ROOT/Cargo.toml" -- shutdown >/dev/null 2>&1 || true
             cargo run --release --manifest-path "$REPO_ROOT/Cargo.toml" -- sandbox delete --yes >/dev/null 2>&1 || true
         ) || true
     fi
@@ -39,7 +39,7 @@ echo "[SMOKE] Project workspace context isolated at: ${MOCK_PROJECT}"
 
 echo "[SMOKE] Verifying CLI argument and state dispatch parsing layers..."
 cargo run --release -- sandbox delete --yes --dry-run
-cargo run --release -- services stop --dry-run
+cargo run --release -- shutdown --dry-run
 cargo run --release -- sandbox stop --name "$MOCK_SANDBOX"
 
 echo "[SMOKE] Validating configuration translation behaviors..."
@@ -76,11 +76,11 @@ if [ "$MODEL_CONFIGURED" = true ]; then
     echo "[SMOKE] 3. sandbox ls"
     cargo run --release --manifest-path "$REPO_ROOT/Cargo.toml" -- sandbox ls
 
-    echo "[SMOKE] 4. services status --output json"
-    cargo run --release --manifest-path "$REPO_ROOT/Cargo.toml" -- services status --output json >/dev/null
+    echo "[SMOKE] 4. sandbox ls"
+    cargo run --release --manifest-path "$REPO_ROOT/Cargo.toml" -- sandbox ls
 
     echo "[SMOKE] 5. shutdown"
-    cargo run --release --manifest-path "$REPO_ROOT/Cargo.toml" -- services stop
+    cargo run --release --manifest-path "$REPO_ROOT/Cargo.toml" -- shutdown
     cargo run --release --manifest-path "$REPO_ROOT/Cargo.toml" -- sandbox delete --yes
 
     popd >/dev/null

@@ -1042,12 +1042,6 @@ fn validate_named_lima_sandbox(id: &str) -> Result<(), color_eyre::Report> {
             id
         ));
     }
-    if id == "tnk-services" || id == "tnk-searxng" {
-        return Err(color_eyre::eyre::eyre!(
-            "'{}' is a services instance, not a project sandbox",
-            id
-        ));
-    }
     Ok(())
 }
 
@@ -1072,9 +1066,6 @@ async fn discover_managed_lima_instances() -> Vec<String> {
         .filter_map(|line| {
             let id = line.trim().to_string();
             if !id.starts_with("tnk-") {
-                return None;
-            }
-            if id == "tnk-services" || id == "tnk-searxng" {
                 return None;
             }
             Some(id)
@@ -1112,9 +1103,6 @@ async fn list_lima_instances() -> Result<Vec<SandboxEntry>, color_eyre::Report> 
             }
             let id = parts[0].trim().to_string();
             if !id.starts_with("tnk-") {
-                return None;
-            }
-            if id == "tnk-services" || id == "tnk-searxng" {
                 return None;
             }
             let status = {

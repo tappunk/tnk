@@ -1152,38 +1152,10 @@ pub async fn status(output: crate::OutputFormat) -> Result<(), color_eyre::Repor
         }
     }
 
-    let services_future = tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        AsyncCommand::new("limactl")
-            .args(["list", "--format", "{{.Status}}", "tnk-services"])
-            .output(),
-    );
-    let sandboxes_future = list_lima_sandboxes();
-
-    let (services_result, sandboxes) = tokio::join!(services_future, sandboxes_future);
-
-    let services_running = services_result
-        .ok()
-        .and_then(Result::ok)
-        .map(|out| {
-            if out.status.success() {
-                String::from_utf8_lossy(&out.stdout)
-                    .trim()
-                    .eq_ignore_ascii_case("running")
-            } else {
-                false
-            }
-        })
-        .unwrap_or(false);
-    if services_running {
-        print_status_row("mcp", "running", "");
-        print_status_row("searxng", "running", "");
-    }
-
-    for (token, status) in &sandboxes {
+    for (token, status) in list_lima_sandboxes().await {
         if status == "Running" {
             let label = format!("sandbox {}", token);
-            print_status_row(&label, status, "");
+            print_status_row(&label, &status, "");
         }
     }
 
@@ -1247,38 +1219,9 @@ pub async fn print_status() -> Result<(), color_eyre::Report> {
         printed_any = true;
     }
 
-    let services_future = tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        AsyncCommand::new("limactl")
-            .args(["list", "--format", "{{.Status}}", "tnk-services"])
-            .output(),
-    );
-    let sandboxes_future = list_lima_sandboxes();
-
-    let (services_result, sandboxes) = tokio::join!(services_future, sandboxes_future);
-
-    let services_running = services_result
-        .ok()
-        .and_then(Result::ok)
-        .map(|out| {
-            if out.status.success() {
-                String::from_utf8_lossy(&out.stdout)
-                    .trim()
-                    .eq_ignore_ascii_case("running")
-            } else {
-                false
-            }
-        })
-        .unwrap_or(false);
-    if services_running {
-        print_status_row("mcp (vm)", "running", "");
-        print_status_row("searxng (vm)", "running", "");
-        printed_any = true;
-    }
-
-    for (token, status) in &sandboxes {
+    for (token, status) in list_lima_sandboxes().await {
         if status.eq_ignore_ascii_case("running") {
-            print_status_row(&format!("sandbox {}", token), "running", "");
+            print_status_row(&format!("sandbox {}", token), &status, "");
             printed_any = true;
         }
     }

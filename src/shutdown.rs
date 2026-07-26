@@ -32,12 +32,7 @@ async fn discover_lima_sandboxes() -> Vec<String> {
         Some(out) => String::from_utf8_lossy(&out.stdout)
             .lines()
             .map(str::trim)
-            .filter(|id| {
-                id.starts_with("tnk-")
-                    && *id != "tnk-services"
-                    && *id != "tnk-searxng"
-                    && *id != "tnk-config"
-            })
+            .filter(|id| id.starts_with("tnk-") && *id != "tnk-config")
             .map(ToString::to_string)
             .collect(),
         None => Vec::new(),
@@ -144,14 +139,10 @@ pub async fn run(_timeout_secs: Option<u64>, dry_run: bool) -> Result<(), color_
         crate::lifecycle::acquire("lima-lifecycle", std::time::Duration::from_secs(20)).await?;
     let _engine_lock =
         crate::lifecycle::acquire("engine", std::time::Duration::from_secs(20)).await?;
-    let _services_lock =
-        crate::lifecycle::acquire("services-runtime", std::time::Duration::from_secs(20)).await?;
-
     for instance in discover_lima_sandboxes().await {
         stop_lima(instance).await;
     }
 
-    crate::services::stop(false).await?;
     stop_engine().await;
     crate::ui::log_info("shutdown complete");
     Ok(())

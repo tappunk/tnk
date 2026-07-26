@@ -26,7 +26,6 @@ pub struct ResolvedConfig {
     pub engine_runtime: Option<String>,
     pub engine_preset: Option<String>,
     pub engine_bind_host: Option<String>,
-    pub services_auto_start: bool,
 }
 
 #[derive(Subcommand)]
@@ -47,7 +46,6 @@ pub struct TnkConfig {
     pub default_engine_runtime: Option<String>,
     pub default_engine_preset: Option<String>,
     pub default_engine_bind_host: Option<String>,
-    pub services_auto_start: Option<bool>,
 }
 
 impl TnkConfig {
@@ -70,7 +68,6 @@ impl TnkConfig {
         let engine_runtime = self.default_engine_runtime.clone();
         let engine_preset = self.default_engine_preset.clone();
         let engine_bind_host = self.default_engine_bind_host.clone();
-        let services_auto_start = self.services_auto_start.unwrap_or(true);
         Ok(ResolvedConfig {
             server_port,
             workspace_root,
@@ -79,7 +76,6 @@ impl TnkConfig {
             engine_runtime,
             engine_preset,
             engine_bind_host,
-            services_auto_start,
         })
     }
 
@@ -107,7 +103,6 @@ impl TnkConfig {
             "engine_bind_host  {}",
             cfg.engine_bind_host.as_deref().unwrap_or("127.0.0.1")
         );
-        println!("services_auto_start  {}", cfg.services_auto_start);
     }
 }
 
@@ -176,18 +171,6 @@ fn apply_env_overrides(config: &mut TnkConfig) {
     if let Ok(v) = std::env::var("TNK_ENGINE_BIND_HOST") {
         config.default_engine_bind_host = Some(v);
     }
-    if let Ok(v) = std::env::var("TNK_SERVICES_AUTO_START") {
-        match v.as_str() {
-            "true" | "1" => config.services_auto_start = Some(true),
-            "false" | "0" => config.services_auto_start = Some(false),
-            _ => {
-                crate::ui::log_warn(&format!(
-                    "invalid TNK_SERVICES_AUTO_START='{}'; ignoring env override",
-                    v
-                ));
-            }
-        }
-    }
 }
 
 pub async fn load() -> Result<TnkConfig, color_eyre::Report> {
@@ -235,9 +218,6 @@ default_provision_profile = "pi"
 # Inference runtime: "llama"
 default_engine_runtime = "llama"
 
-# Auto-start tnk services when running `tnk run`
-services_auto_start = true
-
 # Bind host for inference server (127.0.0.1 for localhost only, 0.0.0.0 for all interfaces)
 default_engine_bind_host = "127.0.0.1"
 
@@ -270,7 +250,6 @@ mod tests {
         assert!(cfg.engine_runtime.is_none());
         assert!(cfg.engine_preset.is_none());
         assert!(cfg.engine_bind_host.is_none());
-        assert!(cfg.services_auto_start);
     }
 
     #[test]
@@ -283,7 +262,6 @@ mod tests {
             default_engine_runtime: Some("llama".to_string()),
             default_engine_preset: Some("llama-default".to_string()),
             default_engine_bind_host: Some("127.0.0.1".to_string()),
-            services_auto_start: Some(false),
         };
 
         let cfg = ResolvedConfig::resolve(&cfg).expect("resolve explicit values");
@@ -295,7 +273,6 @@ mod tests {
         assert_eq!(cfg.engine_runtime.as_deref(), Some("llama"));
         assert_eq!(cfg.engine_preset.as_deref(), Some("llama-default"));
         assert_eq!(cfg.engine_bind_host.as_deref(), Some("127.0.0.1"));
-        assert!(!cfg.services_auto_start);
     }
 
     #[test]

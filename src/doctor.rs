@@ -90,16 +90,6 @@ async fn check_engine() -> Result<(), color_eyre::Report> {
     Ok(())
 }
 
-async fn check_services() -> Result<(), color_eyre::Report> {
-    let items = list_lima_instances().await?;
-    if items.iter().any(|id| id == "tnk-services") {
-        eprintln!("ok: tnk-services lima instance exists");
-    } else {
-        crate::ui::log_info("tnk-services lima instance not created yet");
-    }
-    Ok(())
-}
-
 fn check_locks_dir() -> Result<(), color_eyre::Report> {
     let home = std::env::var("HOME")?;
     let lock_dir = PathBuf::from(home).join(".cache/tnk");
@@ -124,7 +114,6 @@ pub async fn run() -> Result<(), color_eyre::Report> {
     check_default_engine_runtime_binary().await?;
     check_config().await?;
     check_engine().await?;
-    check_services().await?;
     check_locks_dir()?;
     check_managed_instances().await?;
 

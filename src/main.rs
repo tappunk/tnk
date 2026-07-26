@@ -21,7 +21,6 @@ pub mod init;
 pub mod lifecycle;
 pub mod model;
 pub mod sandbox;
-pub mod services;
 pub mod shutdown;
 pub mod ui;
 
@@ -78,12 +77,6 @@ enum Commands {
     Sandbox {
         #[command(subcommand)]
         action: SandboxCommands,
-    },
-
-    #[command(about = "Manage persistent tnk services runtime")]
-    Services {
-        #[command(subcommand)]
-        action: ServicesCommands,
     },
 
     #[command(about = "Start inference engine and tnk services runtime")]
@@ -158,37 +151,6 @@ enum Commands {
 
         #[arg(long, help = "Overwrite existing files even if sizes match")]
         force: bool,
-    },
-}
-
-#[derive(Subcommand)]
-pub enum ServicesCommands {
-    #[command(about = "Start tnk services runtime")]
-    Start {
-        #[arg(short = 'n', long, help = "Preview actions without side effects")]
-        dry_run: bool,
-    },
-    #[command(about = "Stop tnk services runtime")]
-    Stop {
-        #[arg(short = 'n', long, help = "Preview actions without side effects")]
-        dry_run: bool,
-    },
-    #[command(about = "Show tnk services runtime status")]
-    Status {
-        #[arg(short, long, value_enum, default_value_t = OutputFormat::Text)]
-        output: OutputFormat,
-    },
-    #[command(about = "Restart tnk services runtime")]
-    Restart {
-        #[arg(short = 'n', long, help = "Preview actions without side effects")]
-        dry_run: bool,
-    },
-    #[command(about = "Delete tnk services runtime")]
-    Delete {
-        #[arg(short, long, help = "Skip confirmation prompts")]
-        yes: bool,
-        #[arg(short = 'n', long, help = "Preview actions without side effects")]
-        dry_run: bool,
     },
 }
 
@@ -337,16 +299,6 @@ async fn boot(preset: Option<String>, runtime: Option<String>) -> Result<(), col
             eprintln!("starting engine...");
         }
         engine::start(&engine_name, preset, server_port, None, false).await?;
-    }
-
-    if cfg.services_auto_start.unwrap_or(true) {
-        if !crate::ui::is_quiet() {
-            eprintln!("starting services...");
-        }
-        services::start(false).await?;
-        if !crate::ui::is_quiet() {
-            eprintln!("services ready");
-        }
     }
 
     Ok(())
@@ -520,7 +472,6 @@ async fn run() -> Result<(), color_eyre::Report> {
             }
             SandboxCommands::Ls { output, quiet } => sandbox::ls(output, quiet).await?,
         },
-        Some(Commands::Services { action }) => services::run(action).await?,
         Some(Commands::Run {
             preset,
             runtime,

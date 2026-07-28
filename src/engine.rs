@@ -46,16 +46,6 @@ struct PresetSpec {
     extra: Vec<String>,
 }
 
-const MLXCEL_SPEC: EngineRuntimeSpec = EngineRuntimeSpec {
-    name: "mlxcel",
-    executable: "mlxcel-server",
-    pid_file_name: "mlxcel-server.pid",
-    active_preset_file: "active-preset-name-mlxcel",
-    log_stdout: "mlxcel-server.log",
-    log_stderr: "mlxcel-server-err.log",
-    default_bind_host: "127.0.0.1",
-};
-
 const LLAMA_SPEC: EngineRuntimeSpec = EngineRuntimeSpec {
     name: "llama",
     executable: "llama-server",
@@ -66,12 +56,11 @@ const LLAMA_SPEC: EngineRuntimeSpec = EngineRuntimeSpec {
     default_bind_host: "127.0.0.1",
 };
 
-const SUPPORTED_RUNTIMES: [EngineRuntimeSpec; 2] = [LLAMA_SPEC, MLXCEL_SPEC];
+const SUPPORTED_RUNTIMES: [EngineRuntimeSpec; 1] = [LLAMA_SPEC];
 
 pub fn runtime_spec(runtime: &str) -> Option<EngineRuntimeSpec> {
     match runtime {
         "llama" => Some(LLAMA_SPEC),
-        "mlxcel" => Some(MLXCEL_SPEC),
         _ => None,
     }
 }
@@ -81,7 +70,7 @@ pub fn supports_runtime(runtime: &str) -> bool {
 }
 
 pub fn supported_runtime_names() -> &'static [&'static str] {
-    &["llama", "mlxcel"]
+    &["llama"]
 }
 
 pub async fn resolve_runtime_for_profile(

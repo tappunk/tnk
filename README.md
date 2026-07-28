@@ -3,7 +3,7 @@
 
 # tnk (experimental)
 
-**Zero-trust sandbox for local inference and secure AI coding agent runtimes.**
+**Zero-trust sandbox for local inference and AI agent runtimes.**
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Crates.io](https://img.shields.io/crates/v/tnk?color=orange)](https://crates.io/crates/tnk)

@@ -10,7 +10,7 @@
 [![GitHub Release](https://img.shields.io/github/v/release/richalaleman/tnk)](https://github.com/richalaleman/tnk/releases)
 [![X Follow](https://img.shields.io/twitter/follow/richalaleman?style=social)](https://x.com/richalaleman)
 
-[Quick Start](#quick-start) · [Full Docs](https://tappunk.com/tnk/)
+[Quick Start](#quick-start) · [Full Docs](https://richalaleman.github.io/tnk/)
 </div>
 
 ---
@@ -57,14 +57,14 @@ tnk config show      # inspect effective config
 
 ## Config
 
-Config lives at `~/.config/tnk/tnk.toml`. See the [full docs](https://tappunk.com/tnk/) for all settings and options.
+Config lives at `~/.config/tnk/tnk.toml`. See the [full docs](https://richalaleman.github.io/tnk/) for all settings and options.
 
 ## Security
 
 Agents execute package installers, shell commands, and network clients with broad filesystem access. tnk keeps that execution inside isolated sandboxes, mounts only the project workspace, and exposes inference endpoints via explicit environment variables.
 
-See [Security](https://tappunk.com/tnk/security) for the full threat model.
+See [Security](https://richalaleman.github.io/tnk/security) for the full threat model.
 
 ---
 
-**Full documentation:** <https://tappunk.com/tnk/>
+**Full documentation:** <https://richalaleman.github.io/tnk/>

@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="https://raw.githubusercontent.com/tappunk/.github/refs/heads/main/assets/tnk.webp" alt="tnk" width="280"/>
+  <img src="https://raw.githubusercontent.com/richalaleman/.github/refs/heads/main/assets/tnk.webp" alt="tnk" width="280"/>
 
 # tnk (experimental)
 
@@ -7,8 +7,8 @@
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Crates.io](https://img.shields.io/crates/v/tnk?color=orange)](https://crates.io/crates/tnk)
-[![GitHub Release](https://img.shields.io/github/v/release/tappunk/tnk)](https://github.com/tappunk/tnk/releases)
-[![X Follow](https://img.shields.io/twitter/follow/tappunk?style=social)](https://x.com/tappunk)
+[![GitHub Release](https://img.shields.io/github/v/release/richalaleman/tnk)](https://github.com/richalaleman/tnk/releases)
+[![X Follow](https://img.shields.io/twitter/follow/richalaleman?style=social)](https://x.com/richalaleman)
 
 [Quick Start](#quick-start) · [Full Docs](https://tappunk.com/tnk/)
 </div>
@@ -17,11 +17,11 @@
 
 ## Quick Start
 
-![tnk demo](https://raw.githubusercontent.com/tappunk/.github/refs/heads/main/assets/_sandbox-oc-pi.gif)
+![tnk demo](https://raw.githubusercontent.com/richalaleman/.github/refs/heads/main/assets/_sandbox-oc-pi.gif)
 
 ```bash
-brew tap tappunk/tap              # or: cargo install tnk
-brew install tappunk/tap/tnk
+brew tap richalaleman/tap              # or: cargo install tnk
+brew install richalaleman/tap/tnk
 tnk init                          # populate config from tnk-specs
 tnk config init                   # create ~/.config/tnk/tnk.toml
 tnk run                           # boot engine + services

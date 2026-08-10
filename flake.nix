@@ -24,7 +24,7 @@
 
         meta = with pkgs.lib; {
       description = "Zero-trust sandbox for local inference and secure AI coding agent runtimes.";
-          homepage = "https://tappunk.com";
+          homepage = "https://github.com/richalaleman/tnk";
           license = licenses.asl20;
           maintainers = [ ];
           platforms = [ "aarch64-darwin" ];

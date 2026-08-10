@@ -40,7 +40,7 @@ pub fn run(cmd: InitCommands) -> Result<(), color_eyre::Report> {
     let repo_url = cmd
         .git_url
         .clone()
-        .unwrap_or_else(|| "https://github.com/tappunk/tnk-specs.git".to_string());
+        .unwrap_or_else(|| "https://github.com/richalaleman/tnk-specs.git".to_string());
 
     let tmp_dir = tempfile::tempdir()
         .map_err(|e| color_eyre::eyre::eyre!("failed to create temp dir: {}", e))?;

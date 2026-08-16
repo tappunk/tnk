@@ -7,10 +7,10 @@
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Crates.io](https://img.shields.io/crates/v/tnk?color=orange)](https://crates.io/crates/tnk)
-[![GitHub Release](https://img.shields.io/github/v/release/richalaleman/tnk)](https://github.com/richalaleman/tnk/releases)
+[![GitHub Release](https://img.shields.io/github/v/release/tappunk/tnk)](https://github.com/tappunk/tnk/releases)
 [![X Follow](https://img.shields.io/twitter/follow/richalaleman?style=social)](https://x.com/richalaleman)
 
-[Quick Start](#quick-start) · [Full Docs](https://richalaleman.github.io/tnk/)
+[Quick Start](#quick-start) · [Full Docs](https://tappunk.com/tnk/)
 </div>
 
 ---
@@ -20,8 +20,8 @@
 ![tnk demo](https://raw.githubusercontent.com/richalaleman/.github/refs/heads/main/assets/_sandbox-oc-pi.gif)
 
 ```bash
-brew tap richalaleman/tap              # or: cargo install tnk
-brew install richalaleman/tap/tnk
+brew tap tappunk/tap              # or: cargo install tnk
+brew install tappunk/tap/tnk
 tnk init                          # populate config from tnk-specs
 tnk config init                   # create ~/.config/tnk/tnk.toml
 tnk run                           # boot engine + services
@@ -57,14 +57,14 @@ tnk config show      # inspect effective config
 
 ## Config
 
-Config lives at `~/.config/tnk/tnk.toml`. See the [full docs](https://richalaleman.github.io/tnk/) for all settings and options.
+Config lives at `~/.config/tnk/tnk.toml`. See the [full docs](https://tappunk.com/tnk/) for all settings and options.
 
 ## Security
 
 Agents execute package installers, shell commands, and network clients with broad filesystem access. tnk keeps that execution inside isolated sandboxes, mounts only the project workspace, and exposes inference endpoints via explicit environment variables.
 
-See [Security](https://richalaleman.github.io/tnk/security) for the full threat model.
+See [Security](https://tappunk.com/tnk/security) for the full threat model.
 
 ---
 
-**Full documentation:** <https://richalaleman.github.io/tnk/>
+**Full documentation:** <https://tappunk.com/tnk/>

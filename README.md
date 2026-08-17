@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="https://raw.githubusercontent.com/richalaleman/.github/refs/heads/main/assets/tnk.webp" alt="tnk" width="280"/>
+  <img src="https://raw.githubusercontent.com/tappunk/.github/refs/heads/main/assets/tnk.webp" alt="tnk" width="280"/>
 
 # tnk (experimental)
 
@@ -17,7 +17,7 @@
 
 ## Quick Start
 
-![tnk demo](https://raw.githubusercontent.com/richalaleman/.github/refs/heads/main/assets/_sandbox-oc-pi.gif)
+![tnk demo](https://raw.githubusercontent.com/tappunk/.github/refs/heads/main/assets/_sandbox-oc-pi.gif)
 
 ```bash
 brew tap tappunk/tap              # or: cargo install tnk

@@ -8,7 +8,7 @@
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Crates.io](https://img.shields.io/crates/v/tnk?color=orange)](https://crates.io/crates/tnk)
 [![GitHub Release](https://img.shields.io/github/v/release/tappunk/tnk)](https://github.com/tappunk/tnk/releases)
-[![X Follow](https://img.shields.io/twitter/follow/richalaleman?style=social)](https://x.com/richalaleman)
+[![X Follow](https://img.shields.io/twitter/follow/tappunk?style=social)](https://x.com/tappunk)
 
 [Quick Start](#quick-start) · [Full Docs](https://tappunk.com/tnk/)
 </div>

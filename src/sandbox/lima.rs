@@ -150,7 +150,6 @@ async fn instance_is_running(id: &str) -> bool {
 
 pub struct LimaBackend;
 
-#[async_trait::async_trait]
 impl SandboxBackend for LimaBackend {
     const BINARY: &'static str = "limactl";
 
@@ -530,11 +529,7 @@ impl SandboxBackend for LimaBackend {
             }
         }
 
-        for (key, value) in runtime_envs {
-            shell_parts.push(format!("export {}={}", key, shell_escape(value)));
-        }
-
-        for (key, value) in &parsed_envs {
+        for (key, value) in runtime_envs.iter().chain(parsed_envs.iter()) {
             shell_parts.push(format!("export {}={}", key, shell_escape(value)));
         }
 

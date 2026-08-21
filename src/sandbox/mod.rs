@@ -18,7 +18,6 @@ pub mod types;
 
 use shared::load_profile_manifest;
 
-use async_trait::async_trait;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -59,7 +58,7 @@ pub struct ProfileSettings {
 pub use lima::LimaBackend;
 pub use lima::resolve_workspace_context;
 
-#[async_trait]
+#[allow(async_fn_in_trait)]
 #[allow(clippy::too_many_arguments)]
 pub trait SandboxBackend: Sized {
     const BINARY: &'static str;

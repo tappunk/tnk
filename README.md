@@ -5,7 +5,7 @@
 
 **Zero-trust sandbox for local inference and secure AI coding agent runtimes.**
 
-[![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Crates.io](https://img.shields.io/crates/v/tnk?color=orange)](https://crates.io/crates/tnk)
 [![GitHub Release](https://img.shields.io/github/v/release/tappunk/tnk)](https://github.com/tappunk/tnk/releases)
 [![X Follow](https://img.shields.io/twitter/follow/tappunk?style=social)](https://x.com/tappunk)

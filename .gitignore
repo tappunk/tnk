@@ -1,26 +1,4 @@
-# Dependencies
-node_modules/
-
-# Build artifacts
-target/
-
-# Lock files
 *.lock
-
-# Environment secrets
 .env
-
-# Editor swap/backup files
-*~
-*.bak
-*.swp
-*.swo
 *.swpx
-
-# OS
-.DS_Store
-
-# Project files
-.pi/
-scripts/release.sh
 tnk.code-workspace

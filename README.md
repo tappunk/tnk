@@ -21,6 +21,7 @@
 
 ```bash
 brew tap tappunk/tap              # or: cargo install tnk
+brew trust tappunk/tap            # required on recent Homebrew versions
 brew install tappunk/tap/tnk
 tnk init                          # populate config from tnk-specs
 tnk config init                   # create ~/.config/tnk/tnk.toml

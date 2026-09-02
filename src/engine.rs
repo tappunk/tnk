@@ -562,7 +562,7 @@ async fn expand_model_path(model: &str) -> String {
                 d
             }
         })
-        .unwrap_or_else(|| format!("{}/opt/models", home));
+        .unwrap_or_else(|| format!("{}/models", home));
 
     format!("{}/{}", model_dir, model)
 }

@@ -46,7 +46,7 @@ impl TnkConfig {
         };
         let model_dir = match self.model_dir {
             Some(v) => expand_path(v, &home),
-            None => format!("{}/opt/models", home),
+            None => format!("{}/models", home),
         };
         let provision_profile = self
             .default_provision_profile
@@ -196,7 +196,7 @@ server_port = 8080
 workspace_root = "~/code"
 
 # Base directory for model files
-model_dir = "~/opt/models"
+model_dir = "~/models"
 
 # Default sandbox profile
 default_provision_profile = "pi"
@@ -231,7 +231,7 @@ mod tests {
 
         assert_eq!(cfg.server_port, 8080);
         assert!(cfg.workspace_root.ends_with("/code"));
-        assert!(cfg.model_dir.ends_with("/opt/models"));
+        assert!(cfg.model_dir.ends_with("/models"));
         assert_eq!(cfg.provision_profile, "pi");
         assert!(cfg.engine_runtime.is_none());
         assert!(cfg.engine_preset.is_none());
@@ -268,8 +268,8 @@ mod tests {
             "/home/user/code"
         );
         assert_eq!(
-            expand_path("~/opt/models".to_string(), "/home/user"),
-            "/home/user/opt/models"
+            expand_path("~/models".to_string(), "/home/user"),
+            "/home/user/models"
         );
     }
 

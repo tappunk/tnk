@@ -64,7 +64,6 @@ fn build_start_args(id: &str, project_root: &Path, settings: &ProfileSettings) -
         "--name".into(),
         id.to_string(),
         "--vm-type=vz".into(),
-        "--network=vzNAT".into(),
         "--mount-type=virtiofs".into(),
         "--containerd=system".into(),
     ];

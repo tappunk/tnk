@@ -741,8 +741,7 @@ impl SandboxBackend for LimaBackend {
         let inference_url = format!("http://{}:{}/v1", host_gateway, port);
 
         Ok(vec![
-            ("TNK_INFERENCE_URL".to_string(), inference_url.clone()),
-            ("TNK_OPENAI_URL".to_string(), inference_url),
+            ("TNK_INFERENCE_URL".to_string(), inference_url),
             ("TNK_MODEL_NAME".to_string(), model_name.to_string()),
             ("TNK_ENGINE_RUNTIME".to_string(), engine_runtime.to_string()),
         ])
@@ -1245,12 +1244,11 @@ async fn run_provision_lima(
         }
     }
 
-    let openai_url = shell_escape(&format!("http://{}:{}/v1", host_gateway, port));
+    let inference_url = shell_escape(&format!("http://{}:{}/v1", host_gateway, port));
     let provision_cmd = format!(
         "set -eu -o pipefail\n{}\nbash {}",
         [
-            format!("export TNK_OPENAI_URL={}", openai_url),
-            format!("export TNK_INFERENCE_URL={}", openai_url),
+            format!("export TNK_INFERENCE_URL={}", inference_url),
             format!("export TNK_MODEL_NAME={}", shell_escape(model_name)),
             format!("export TNK_CTX_WINDOW={}", ctx_window),
             format!("export TNK_WORKSPACE_MOUNT={}", shell_escape(mount_path)),

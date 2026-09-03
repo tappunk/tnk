@@ -9,7 +9,7 @@ pub struct ResolvedConfig {
     pub workspace_root: String,
     pub provision_profile: String,
     pub engine_runtime: Option<String>,
-    pub engine_preset: Option<String>,
+    pub model: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -27,7 +27,7 @@ pub struct TnkConfig {
     pub workspace_root: Option<String>,
     pub default_provision_profile: Option<String>,
     pub default_engine_runtime: Option<String>,
-    pub default_engine_preset: Option<String>,
+    pub default_model: Option<String>,
 }
 
 impl TnkConfig {
@@ -44,13 +44,13 @@ impl TnkConfig {
             .default_provision_profile
             .unwrap_or_else(|| "pi".to_string());
         let engine_runtime = self.default_engine_runtime.clone();
-        let engine_preset = self.default_engine_preset.clone();
+        let model = self.default_model.clone();
         Ok(ResolvedConfig {
             server_port,
             workspace_root,
             provision_profile,
             engine_runtime,
-            engine_preset,
+            model,
         })
     }
 
@@ -70,8 +70,8 @@ impl TnkConfig {
             cfg.engine_runtime.as_deref().unwrap_or("<default>")
         );
         println!(
-            "engine_preset     {}",
-            cfg.engine_preset.as_deref().unwrap_or("<none>")
+            "model             {}",
+            cfg.model.as_deref().unwrap_or("<none>")
         );
     }
 }
@@ -128,11 +128,11 @@ fn apply_env_overrides(config: &mut TnkConfig) {
             ));
         }
     }
-    if let Ok(v) = std::env::var("TNK_ENGINE_PRESET") {
+    if let Ok(v) = std::env::var("TNK_MODEL") {
         if v.is_empty() {
-            crate::ui::log_warn("TNK_ENGINE_PRESET is empty; ignoring env override");
+            crate::ui::log_warn("TNK_MODEL is empty; ignoring env override");
         } else {
-            config.default_engine_preset = Some(v);
+            config.default_model = Some(v);
         }
     }
 }
@@ -180,7 +180,7 @@ default_provision_profile = "pi"
 default_engine_runtime = "llama"
 
 # Model name injected into sandboxes as TNK_MODEL_NAME
-# default_engine_preset = "llama-default"
+# default_model = "llama-default"
 
 "##;
 
@@ -203,7 +203,7 @@ mod tests {
         assert!(cfg.workspace_root.ends_with("/code"));
         assert_eq!(cfg.provision_profile, "pi");
         assert!(cfg.engine_runtime.is_none());
-        assert!(cfg.engine_preset.is_none());
+        assert!(cfg.model.is_none());
     }
 
     #[test]
@@ -213,7 +213,7 @@ mod tests {
             workspace_root: Some("/tmp/ws".to_string()),
             default_provision_profile: Some("base".to_string()),
             default_engine_runtime: Some("llama".to_string()),
-            default_engine_preset: Some("llama-default".to_string()),
+            default_model: Some("llama-default".to_string()),
         };
 
         let cfg = ResolvedConfig::resolve(&cfg).expect("resolve explicit values");
@@ -222,7 +222,7 @@ mod tests {
         assert_eq!(cfg.workspace_root, "/tmp/ws");
         assert_eq!(cfg.provision_profile, "base");
         assert_eq!(cfg.engine_runtime.as_deref(), Some("llama"));
-        assert_eq!(cfg.engine_preset.as_deref(), Some("llama-default"));
+        assert_eq!(cfg.model.as_deref(), Some("llama-default"));
     }
 
     #[test]

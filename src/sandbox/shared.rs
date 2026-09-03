@@ -75,11 +75,11 @@ pub async fn resolve_active_model_and_ctx_impl(
 ) -> Result<(String, u32), color_eyre::Report> {
     let cfg = crate::config::load().await?;
     let model = cfg
-        .default_engine_preset
+        .default_model
         .filter(|m| !m.trim().is_empty())
         .ok_or_else(|| {
             color_eyre::eyre::eyre!(
-                "engine runtime '{}' has no model configured; set default_engine_preset in tnk.toml",
+                "engine runtime '{}' has no model configured; set default_model in tnk.toml",
                 engine_name
             )
         })?;

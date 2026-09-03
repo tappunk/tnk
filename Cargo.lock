@@ -611,7 +611,7 @@ dependencies = [
 
 [[package]]
 name = "tnk"
-version = "0.1.46"
+version = "0.1.47"
 dependencies = [
  "clap",
  "clap_complete",

@@ -60,11 +60,7 @@ pub fn runtime_env_summary(envs: &[(String, String)]) -> serde_json::Value {
     for (k, v) in envs {
         if matches!(
             k.as_str(),
-            "TNK_INFERENCE_URL"
-                | "TNK_MCP_BRIDGE_URL"
-                | "TNK_SEARXNG_URL"
-                | "TNK_MODEL_NAME"
-                | "TNK_ENGINE_RUNTIME"
+            "TNK_INFERENCE_URL" | "TNK_MODEL_NAME" | "TNK_ENGINE_RUNTIME"
         ) {
             map.insert(k.clone(), serde_json::Value::String(v.clone()));
         }

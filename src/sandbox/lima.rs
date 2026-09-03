@@ -739,14 +739,10 @@ impl SandboxBackend for LimaBackend {
     ) -> Result<Vec<(String, String)>, color_eyre::Report> {
         let host_gateway = Self::resolve_gateway(id).await?;
         let inference_url = format!("http://{}:{}/v1", host_gateway, port);
-        let mcp_bridge_url = format!("http://{}:18765", host_gateway);
-        let searxng_url = format!("http://{}:18766", host_gateway);
 
         Ok(vec![
             ("TNK_INFERENCE_URL".to_string(), inference_url.clone()),
             ("TNK_OPENAI_URL".to_string(), inference_url),
-            ("TNK_MCP_BRIDGE_URL".to_string(), mcp_bridge_url),
-            ("TNK_SEARXNG_URL".to_string(), searxng_url),
             ("TNK_MODEL_NAME".to_string(), model_name.to_string()),
             ("TNK_ENGINE_RUNTIME".to_string(), engine_runtime.to_string()),
         ])
@@ -1250,15 +1246,11 @@ async fn run_provision_lima(
     }
 
     let openai_url = shell_escape(&format!("http://{}:{}/v1", host_gateway, port));
-    let mcp_bridge_url = shell_escape(&format!("http://{}:18765", host_gateway));
-    let searxng_url = shell_escape(&format!("http://{}:18766", host_gateway));
     let provision_cmd = format!(
         "set -eu -o pipefail\n{}\nbash {}",
         [
             format!("export TNK_OPENAI_URL={}", openai_url),
             format!("export TNK_INFERENCE_URL={}", openai_url),
-            format!("export TNK_MCP_BRIDGE_URL={}", mcp_bridge_url),
-            format!("export TNK_SEARXNG_URL={}", searxng_url),
             format!("export TNK_MODEL_NAME={}", shell_escape(model_name)),
             format!("export TNK_CTX_WINDOW={}", ctx_window),
             format!("export TNK_WORKSPACE_MOUNT={}", shell_escape(mount_path)),

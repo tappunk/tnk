@@ -1100,7 +1100,7 @@ async fn wait_for_lima_ready(id: &str, timeout_secs: u64) -> Result<(), color_ey
         let output = tokio::time::timeout(
             std::time::Duration::from_secs(5),
             Command::new("limactl")
-                .args(["shell", id, "--", "echo", "ready"])
+                .args(["shell", "--workdir", "/", id, "--", "echo", "ready"])
                 .output(),
         )
         .await
@@ -1177,6 +1177,8 @@ async fn run_provision_lima(
     let mkdir_output = run_limactl(
         vec![
             "shell".into(),
+            "--workdir".into(),
+            "/".into(),
             id.to_string(),
             "--".into(),
             "mkdir".into(),
@@ -1269,10 +1271,18 @@ async fn run_provision_lima(
     );
 
     let mut cmd = Command::new("limactl");
-    cmd.args(["shell", id, "--", "bash", "-lc"])
-        .arg(provision_cmd)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+    cmd.args([
+        "shell",
+        "--workdir",
+        guest_provision_dir.as_str(),
+        id,
+        "--",
+        "bash",
+        "-lc",
+    ])
+    .arg(provision_cmd)
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped());
 
     let mut child = cmd.spawn().map_err(|e| {
         color_eyre::eyre::eyre!("provision spawn failed for '{}': {}", script_name, e)

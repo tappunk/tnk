@@ -266,12 +266,7 @@ impl SandboxBackend for LimaBackend {
             let server_port = cfg.server_port.unwrap_or(8080);
             let engine_name = cfg.default_engine_runtime.as_deref().unwrap_or("llama");
             let (active_model, ctx_window) =
-                crate::sandbox::shared::resolve_active_model_and_ctx_impl(
-                    &home,
-                    server_port,
-                    engine_name,
-                )
-                .await?;
+                crate::sandbox::shared::resolve_active_model_and_ctx_impl(engine_name).await?;
 
             let cache_dir = PathBuf::from(&home)
                 .join(".cache/tnk")
@@ -461,12 +456,7 @@ impl SandboxBackend for LimaBackend {
             let server_port = cfg.server_port.unwrap_or(8080);
             let engine_name = cfg.default_engine_runtime.as_deref().unwrap_or("llama");
             let (active_model, ctx_window) =
-                crate::sandbox::shared::resolve_active_model_and_ctx_impl(
-                    &home,
-                    server_port,
-                    engine_name,
-                )
-                .await?;
+                crate::sandbox::shared::resolve_active_model_and_ctx_impl(engine_name).await?;
 
             let cache_dir = PathBuf::from(&home)
                 .join(".cache/tnk")
@@ -764,11 +754,9 @@ impl SandboxBackend for LimaBackend {
     }
 
     async fn resolve_active_model_and_ctx(
-        port: u16,
         engine_runtime: &str,
     ) -> Result<(String, u32), color_eyre::Report> {
-        let home = std::env::var("HOME")?;
-        crate::sandbox::shared::resolve_active_model_and_ctx_impl(&home, port, engine_runtime).await
+        crate::sandbox::shared::resolve_active_model_and_ctx_impl(engine_runtime).await
     }
 }
 

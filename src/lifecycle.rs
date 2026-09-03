@@ -6,6 +6,10 @@ use tokio::fs;
 use tokio::io::AsyncWriteExt;
 use tokio::task::spawn_blocking;
 
+pub fn is_process_alive(pid: u32) -> bool {
+    unsafe { libc::kill(pid as i32, 0) == 0 }
+}
+
 pub struct RuntimeLock {
     path: PathBuf,
 }
@@ -14,10 +18,6 @@ impl Drop for RuntimeLock {
     fn drop(&mut self) {
         std::fs::remove_file(&self.path).ok();
     }
-}
-
-pub fn is_process_alive(pid: u32) -> bool {
-    unsafe { libc::kill(pid as i32, 0) == 0 }
 }
 
 fn lock_path(name: &str) -> Result<PathBuf, color_eyre::Report> {

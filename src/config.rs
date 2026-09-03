@@ -7,11 +7,9 @@ use std::path::PathBuf;
 pub struct ResolvedConfig {
     pub server_port: u16,
     pub workspace_root: String,
-    pub model_dir: String,
     pub provision_profile: String,
     pub engine_runtime: Option<String>,
     pub engine_preset: Option<String>,
-    pub engine_bind_host: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -27,11 +25,9 @@ pub enum ConfigCommands {
 pub struct TnkConfig {
     pub server_port: Option<u16>,
     pub workspace_root: Option<String>,
-    pub model_dir: Option<String>,
     pub default_provision_profile: Option<String>,
     pub default_engine_runtime: Option<String>,
     pub default_engine_preset: Option<String>,
-    pub default_engine_bind_host: Option<String>,
 }
 
 impl TnkConfig {
@@ -44,24 +40,17 @@ impl TnkConfig {
             Some(v) => expand_path(v, &home),
             None => format!("{}/code", home),
         };
-        let model_dir = match self.model_dir {
-            Some(v) => expand_path(v, &home),
-            None => format!("{}/models", home),
-        };
         let provision_profile = self
             .default_provision_profile
             .unwrap_or_else(|| "pi".to_string());
         let engine_runtime = self.default_engine_runtime.clone();
         let engine_preset = self.default_engine_preset.clone();
-        let engine_bind_host = self.default_engine_bind_host.clone();
         Ok(ResolvedConfig {
             server_port,
             workspace_root,
-            model_dir,
             provision_profile,
             engine_runtime,
             engine_preset,
-            engine_bind_host,
         })
     }
 
@@ -75,7 +64,6 @@ impl TnkConfig {
         };
         println!("server_port       {}", cfg.server_port);
         println!("workspace_root    {}", cfg.workspace_root);
-        println!("model_dir         {}", cfg.model_dir);
         println!("provision_profile {}", cfg.provision_profile);
         println!(
             "engine_runtime    {}",
@@ -84,10 +72,6 @@ impl TnkConfig {
         println!(
             "engine_preset     {}",
             cfg.engine_preset.as_deref().unwrap_or("<none>")
-        );
-        println!(
-            "engine_bind_host  {}",
-            cfg.engine_bind_host.as_deref().unwrap_or("127.0.0.1")
         );
     }
 }
@@ -131,14 +115,11 @@ fn apply_env_overrides(config: &mut TnkConfig) {
     if let Ok(v) = std::env::var("TNK_WORKSPACE_ROOT") {
         config.workspace_root = Some(v);
     }
-    if let Ok(v) = std::env::var("TNK_MODEL_DIR") {
-        config.model_dir = Some(v);
-    }
     if let Ok(v) = std::env::var("TNK_PROVISION_PROFILE") {
         config.default_provision_profile = Some(v);
     }
     if let Ok(v) = std::env::var("TNK_ENGINE_RUNTIME") {
-        if crate::engine::supports_runtime(&v) {
+        if crate::sandbox::types::validate_engine_runtime(&v).is_ok() {
             config.default_engine_runtime = Some(v);
         } else {
             crate::ui::log_warn(&format!(
@@ -153,9 +134,6 @@ fn apply_env_overrides(config: &mut TnkConfig) {
         } else {
             config.default_engine_preset = Some(v);
         }
-    }
-    if let Ok(v) = std::env::var("TNK_ENGINE_BIND_HOST") {
-        config.default_engine_bind_host = Some(v);
     }
 }
 
@@ -195,21 +173,13 @@ server_port = 8080
 # Root used for project-to-sandbox mapping (must NOT be your home directory)
 workspace_root = "~/code"
 
-# Base directory for model files
-model_dir = "~/models"
-
 # Default sandbox profile
 default_provision_profile = "pi"
 
 # Inference runtime: "llama"
 default_engine_runtime = "llama"
 
-# Bind host for inference server (127.0.0.1 for localhost only, 0.0.0.0 for all interfaces)
-default_engine_bind_host = "127.0.0.1"
-
-# Preset to load when --preset is omitted from engine start.
-# Must match the filename stem of a file in ~/.config/tnk/provider.d/
-# Example: "llama-default" loads ~/.config/tnk/provider.d/llama-default.ini
+# Model name injected into sandboxes as TNK_MODEL_NAME
 # default_engine_preset = "llama-default"
 
 "##;
@@ -231,11 +201,9 @@ mod tests {
 
         assert_eq!(cfg.server_port, 8080);
         assert!(cfg.workspace_root.ends_with("/code"));
-        assert!(cfg.model_dir.ends_with("/models"));
         assert_eq!(cfg.provision_profile, "pi");
         assert!(cfg.engine_runtime.is_none());
         assert!(cfg.engine_preset.is_none());
-        assert!(cfg.engine_bind_host.is_none());
     }
 
     #[test]
@@ -243,22 +211,18 @@ mod tests {
         let cfg = TnkConfig {
             server_port: Some(9001),
             workspace_root: Some("/tmp/ws".to_string()),
-            model_dir: Some("/tmp/models".to_string()),
             default_provision_profile: Some("base".to_string()),
             default_engine_runtime: Some("llama".to_string()),
             default_engine_preset: Some("llama-default".to_string()),
-            default_engine_bind_host: Some("127.0.0.1".to_string()),
         };
 
         let cfg = ResolvedConfig::resolve(&cfg).expect("resolve explicit values");
 
         assert_eq!(cfg.server_port, 9001);
         assert_eq!(cfg.workspace_root, "/tmp/ws");
-        assert_eq!(cfg.model_dir, "/tmp/models");
         assert_eq!(cfg.provision_profile, "base");
         assert_eq!(cfg.engine_runtime.as_deref(), Some("llama"));
         assert_eq!(cfg.engine_preset.as_deref(), Some("llama-default"));
-        assert_eq!(cfg.engine_bind_host.as_deref(), Some("127.0.0.1"));
     }
 
     #[test]

@@ -72,74 +72,25 @@ pub fn runtime_env_summary(envs: &[(String, String)]) -> serde_json::Value {
     serde_json::Value::Object(map)
 }
 
+pub const DEFAULT_CONTEXT_WINDOW: u32 = 131072;
+
 pub async fn resolve_active_model_and_ctx_impl(
-    home: &str,
-    port: u16,
     engine_name: &str,
 ) -> Result<(String, u32), color_eyre::Report> {
-    let default_model = if let Ok(cfg) = crate::config::load().await
-        && let Some(name) = cfg.default_engine_preset.filter(|m| !m.trim().is_empty())
-    {
-        name
-    } else if let Some((model, _extra)) = crate::engine::resolve_default_preset(engine_name).await {
-        model
-    } else {
-        return Err(color_eyre::eyre::eyre!(
-            "engine runtime '{}' has no default model configured; \
-             set default_engine_preset in tnk.toml or ensure provider.d/{}-default.ini exists",
-            engine_name,
-            engine_name
-        ));
-    };
-    let preset_ctx_hint = crate::model::DEFAULT_CONTEXT_WINDOW;
-
-    let active_preset_file = crate::engine::active_preset_file_for_runtime(engine_name)
+    let cfg = crate::config::load().await?;
+    let model = cfg
+        .default_engine_preset
+        .filter(|m| !m.trim().is_empty())
         .ok_or_else(|| {
             color_eyre::eyre::eyre!(
-                "engine runtime '{}' has no preset file mapping",
+                "engine runtime '{}' has no model configured; set default_engine_preset in tnk.toml",
                 engine_name
             )
         })?;
-    let active_model_file = PathBuf::from(home).join(format!(".cache/tnk/{}", active_preset_file));
-    let active_model_from_file = fs::read_to_string(&active_model_file)
-        .await
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty());
+    let model = model.trim().to_string();
+    crate::sandbox::types::validate_model_name(&model)?;
 
-    let fallback_model = active_model_from_file.unwrap_or_else(|| default_model.clone());
-
-    let parsed_model = match crate::model::poll_loaded_model("127.0.0.1", port, 5, 1.0).await {
-        Ok(Some(model)) => model,
-        Ok(None) => fallback_model.clone(),
-        Err(err) => {
-            eprintln!(
-                "warning: failed to poll loaded model from inference server, using fallback: {}",
-                err
-            );
-            fallback_model.clone()
-        }
-    };
-    let sanitized_model = if parsed_model.contains('/') || parsed_model.contains('\\') {
-        std::path::Path::new(&parsed_model)
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or(&parsed_model)
-            .to_string()
-    } else {
-        parsed_model.clone()
-    };
-    let active_model = if sanitized_model.trim().is_empty() {
-        fallback_model
-    } else {
-        sanitized_model
-    };
-    let model_ctx_window = crate::model::get_ctx_window("127.0.0.1", port)
-        .await
-        .unwrap_or(preset_ctx_hint);
-    let ctx_window = std::cmp::max(model_ctx_window, preset_ctx_hint);
-
-    Ok((active_model, ctx_window))
+    Ok((model, DEFAULT_CONTEXT_WINDOW))
 }
 
 pub async fn load_profile_manifest(

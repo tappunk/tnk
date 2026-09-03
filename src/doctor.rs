@@ -3,40 +3,6 @@ use std::process::Stdio;
 
 use tokio::process::Command;
 
-async fn check_default_engine_runtime_binary() -> Result<(), color_eyre::Report> {
-    let runtime = crate::config::load()
-        .await?
-        .default_engine_runtime
-        .unwrap_or_else(|| "llama".to_string());
-
-    let spec = crate::engine::runtime_spec(&runtime).ok_or_else(|| {
-        color_eyre::eyre::eyre!(
-            "unsupported default engine runtime '{}' (supported: {})",
-            runtime,
-            crate::engine::supported_runtime_names().join(", ")
-        )
-    })?;
-
-    let status = tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        Command::new(spec.executable)
-            .arg("--version")
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status(),
-    )
-    .await
-    .map_err(|_| color_eyre::eyre::eyre!("{} --version timed out after 5s", spec.executable))??;
-
-    if status.success() {
-        eprintln!("ok: {} available", spec.executable);
-        Ok(())
-    } else {
-        eprintln!("error: {} not found", spec.executable);
-        Err(color_eyre::eyre::eyre!("{} missing", spec.executable))
-    }
-}
-
 async fn list_lima_instances() -> Result<Vec<String>, color_eyre::Report> {
     let output = tokio::time::timeout(
         std::time::Duration::from_secs(15),
@@ -67,15 +33,6 @@ async fn check_config() -> Result<(), color_eyre::Report> {
     Ok(())
 }
 
-async fn check_engine() -> Result<(), color_eyre::Report> {
-    if crate::engine::is_running().await {
-        eprintln!("ok: inference engine running");
-    } else {
-        crate::ui::log_info("inference engine not running");
-    }
-    Ok(())
-}
-
 fn check_locks_dir() -> Result<(), color_eyre::Report> {
     let home = std::env::var("HOME")?;
     let lock_dir = PathBuf::from(home).join(".cache/tnk");
@@ -97,9 +54,7 @@ async fn check_managed_instances() -> Result<(), color_eyre::Report> {
 pub async fn run() -> Result<(), color_eyre::Report> {
     eprintln!("tnk doctor");
 
-    check_default_engine_runtime_binary().await?;
     check_config().await?;
-    check_engine().await?;
     check_locks_dir()?;
     check_managed_instances().await?;
 

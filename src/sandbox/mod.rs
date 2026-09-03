@@ -101,7 +101,6 @@ pub trait SandboxBackend: Sized {
     ) -> Result<Vec<(String, String)>, color_eyre::Report>;
 
     async fn resolve_active_model_and_ctx(
-        port: u16,
         engine_runtime: &str,
     ) -> Result<(String, u32), color_eyre::Report>;
 }
@@ -128,12 +127,10 @@ pub async fn start(
     let (id, project_root, _workdir) = resolve_workspace_context().await?;
 
     let settings = resolve_profile_settings(&profile_name, &project_root).await?;
-    let home = std::env::var("HOME")?;
     let server_port = cfg.server_port.unwrap_or(8080);
     let engine_name = cfg.default_engine_runtime.as_deref().unwrap_or("llama");
     let (active_model, _ctx_window) =
-        crate::sandbox::shared::resolve_active_model_and_ctx_impl(&home, server_port, engine_name)
-            .await?;
+        crate::sandbox::shared::resolve_active_model_and_ctx_impl(engine_name).await?;
     let runtime_envs =
         LimaBackend::runtime_env(&id, server_port, engine_name, &active_model).await?;
 
@@ -153,12 +150,10 @@ pub async fn shell(
     let (id, project_root, _workdir) = resolve_workspace_context().await?;
 
     let settings = resolve_profile_settings("base", &project_root).await?;
-    let home = std::env::var("HOME")?;
     let server_port = cfg.server_port.unwrap_or(8080);
     let engine_name = cfg.default_engine_runtime.as_deref().unwrap_or("llama");
     let (active_model, _ctx_window) =
-        crate::sandbox::shared::resolve_active_model_and_ctx_impl(&home, server_port, engine_name)
-            .await?;
+        crate::sandbox::shared::resolve_active_model_and_ctx_impl(engine_name).await?;
     let runtime_envs =
         LimaBackend::runtime_env(&id, server_port, engine_name, &active_model).await?;
 

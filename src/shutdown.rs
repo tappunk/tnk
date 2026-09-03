@@ -25,7 +25,7 @@ async fn discover_lima_sandboxes() -> Vec<String> {
     }
 }
 
-async fn stop_lima(name: String) {
+async fn stop_lima(name: String, grace_secs: u64) {
     let output = tokio::time::timeout(
         std::time::Duration::from_secs(15),
         AsyncCommand::new("limactl")
@@ -55,7 +55,7 @@ async fn stop_lima(name: String) {
     }
 
     let graceful = tokio::time::timeout(
-        std::time::Duration::from_secs(60),
+        std::time::Duration::from_secs(grace_secs),
         AsyncCommand::new("limactl").args(["stop", &name]).output(),
     )
     .await;
@@ -94,16 +94,17 @@ async fn stop_lima(name: String) {
     }
 }
 
-pub async fn run(_timeout_secs: Option<u64>, dry_run: bool) -> Result<(), color_eyre::Report> {
+pub async fn run(timeout_secs: Option<u64>, dry_run: bool) -> Result<(), color_eyre::Report> {
     if dry_run {
         crate::ui::log_info("dry run, skipping shutdown actions");
         return Ok(());
     }
 
+    let grace_secs = timeout_secs.unwrap_or(60);
     let _lima_lock =
         crate::lifecycle::acquire("lima-lifecycle", std::time::Duration::from_secs(20)).await?;
     for instance in discover_lima_sandboxes().await {
-        stop_lima(instance).await;
+        stop_lima(instance, grace_secs).await;
     }
 
     crate::ui::log_info("shutdown complete");

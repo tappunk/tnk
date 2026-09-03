@@ -123,16 +123,6 @@ pub fn validate_engine_runtime(runtime: &str) -> Result<(), color_eyre::Report> 
     Ok(())
 }
 
-pub fn validate_env_value(value: &str, field: &str) -> Result<(), color_eyre::Report> {
-    if value.contains('\0') || value.contains('\n') || value.contains('\r') {
-        return Err(color_eyre::eyre::eyre!(
-            "invalid value for {}: contains control characters",
-            field
-        ));
-    }
-    Ok(())
-}
-
 pub fn validate_mount_path(path: &str) -> Result<(), color_eyre::Report> {
     if !path.starts_with('/') {
         return Err(color_eyre::eyre::eyre!(

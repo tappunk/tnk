@@ -1,4 +1,3 @@
-use std::io::{self, IsTerminal, Write};
 use std::sync::atomic::{AtomicU8, Ordering};
 
 use clap::error::ErrorKind;
@@ -31,70 +30,10 @@ pub fn log_info(message: &str) {
     }
 }
 
-pub fn log_verbose(message: &str) {
-    if GLOBAL_VERBOSITY.load(Ordering::Relaxed) == VERBOSITY_VERBOSE {
-        eprintln!("info: {}", message);
-    }
-}
-
 pub fn log_warn(message: &str) {
     if GLOBAL_VERBOSITY.load(Ordering::Relaxed) >= VERBOSITY_NORMAL {
         eprintln!("warning: {}", message);
     }
-}
-
-pub fn select_list(items: &[&str]) -> Option<usize> {
-    if items.is_empty() {
-        return None;
-    }
-
-    loop {
-        let stderr = io::stderr();
-        let mut handle = stderr.lock();
-
-        writeln!(handle).ok();
-        for (i, item) in items.iter().enumerate() {
-            writeln!(handle, "  {}) {}", i + 1, item).ok();
-        }
-        write!(handle, "Select preset (1-{}) or q to quit: ", items.len()).ok();
-        handle.flush().ok();
-
-        let mut input = String::new();
-        io::stdin().read_line(&mut input).ok();
-
-        let trimmed = input.trim();
-        if trimmed == "q" || trimmed.is_empty() {
-            return None;
-        }
-
-        if let Some(n) = trimmed
-            .parse::<usize>()
-            .ok()
-            .filter(|n| *n > 0 && *n <= items.len())
-        {
-            return Some(n - 1);
-        }
-    }
-}
-
-pub fn is_human_output(output: crate::OutputFormat) -> bool {
-    if output != crate::OutputFormat::Text {
-        return false;
-    }
-    if std::env::var("NO_COLOR").is_ok() {
-        return false;
-    }
-    if let Ok(v) = std::env::var("CLICOLOR")
-        && v == "0"
-    {
-        return false;
-    }
-    if let Ok(v) = std::env::var("CLICOLOR_FORCE")
-        && v == "1"
-    {
-        return true;
-    }
-    io::stderr().is_terminal()
 }
 
 #[derive(Copy, Clone, PartialEq)]

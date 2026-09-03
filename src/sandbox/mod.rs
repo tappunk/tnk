@@ -12,18 +12,12 @@ use std::path::{Path, PathBuf};
 pub struct SandboxManifest {
     pub resources: Option<ResourceLimits>,
     pub mounts: Option<HashMap<String, String>>,
-    pub security: Option<SecurityCaps>,
 }
 
 #[derive(serde::Deserialize, Debug, Clone, Default)]
 pub struct ResourceLimits {
     pub cpus: Option<u32>,
     pub memory: Option<String>,
-}
-
-#[derive(serde::Deserialize, Debug, Clone, Default)]
-pub struct SecurityCaps {
-    pub network: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -37,7 +31,6 @@ pub struct SandboxEntry {
 pub struct ProfileSettings {
     pub cpus: Option<u32>,
     pub memory: Option<String>,
-    pub network_none: bool,
     pub workspace_guest_path: String,
 }
 
@@ -47,8 +40,6 @@ pub use lima::resolve_workspace_context;
 #[allow(async_fn_in_trait)]
 #[allow(clippy::too_many_arguments)]
 pub trait SandboxBackend: Sized {
-    const BINARY: &'static str;
-
     async fn resolve_id() -> Result<(String, PathBuf, PathBuf), color_eyre::Report>;
 
     async fn start(
@@ -127,7 +118,7 @@ pub async fn start(
     let (id, project_root, _workdir) = resolve_workspace_context().await?;
 
     let settings = resolve_profile_settings(&profile_name, &project_root).await?;
-    let server_port = cfg.server_port.unwrap_or(8080);
+    let server_port = cfg.server_port.unwrap_or(9931);
     let engine_name = cfg.default_engine_runtime.as_deref().unwrap_or("llama");
     let (active_model, _ctx_window) =
         crate::sandbox::shared::resolve_active_model_and_ctx_impl(engine_name).await?;
@@ -150,7 +141,7 @@ pub async fn shell(
     let (id, project_root, _workdir) = resolve_workspace_context().await?;
 
     let settings = resolve_profile_settings("base", &project_root).await?;
-    let server_port = cfg.server_port.unwrap_or(8080);
+    let server_port = cfg.server_port.unwrap_or(9931);
     let engine_name = cfg.default_engine_runtime.as_deref().unwrap_or("llama");
     let (active_model, _ctx_window) =
         crate::sandbox::shared::resolve_active_model_and_ctx_impl(engine_name).await?;
@@ -232,14 +223,6 @@ async fn resolve_profile_settings(
         if let Some(ref resources) = m.resources {
             settings.cpus = resources.cpus;
             settings.memory = resources.memory.clone();
-        }
-        if let Some(ref security) = m.security
-            && let Some(ref network) = security.network
-        {
-            let mode = network.trim();
-            if mode.eq_ignore_ascii_case("none") || mode.eq_ignore_ascii_case("restricted") {
-                settings.network_none = true;
-            }
         }
         if let Some(ref mounts) = m.mounts
             && let Some(guest) = mounts.get("workspace")

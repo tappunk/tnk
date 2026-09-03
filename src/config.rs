@@ -32,7 +32,7 @@ pub struct TnkConfig {
 
 impl TnkConfig {
     fn resolve(self) -> Result<ResolvedConfig, color_eyre::Report> {
-        let server_port = self.server_port.unwrap_or(8080);
+        let server_port = self.server_port.unwrap_or(9931);
         let home = dirs::home_dir()
             .map(|p| p.to_string_lossy().to_string())
             .ok_or_else(|| color_eyre::eyre::eyre!("could not resolve home directory"))?;
@@ -167,8 +167,8 @@ pub fn init_config(force: bool) -> Result<(), color_eyre::Report> {
 
     let template = r##"# tnk configuration
 
-# API port for local inference server
-server_port = 8080
+# API port for inference server
+server_port = 9931
 
 # Root used for project-to-sandbox mapping (must NOT be your home directory)
 workspace_root = "~/code"
@@ -180,7 +180,7 @@ default_provision_profile = "pi"
 default_engine_runtime = "llama"
 
 # Model name injected into sandboxes as TNK_MODEL_NAME
-# default_model = "llama-default"
+# default_model = "ai-fast"
 
 "##;
 
@@ -199,7 +199,7 @@ mod tests {
         let cfg = TnkConfig::default();
         let cfg = ResolvedConfig::resolve(&cfg).expect("resolve defaults");
 
-        assert_eq!(cfg.server_port, 8080);
+        assert_eq!(cfg.server_port, 9931);
         assert!(cfg.workspace_root.ends_with("/code"));
         assert_eq!(cfg.provision_profile, "pi");
         assert!(cfg.engine_runtime.is_none());

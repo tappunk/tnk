@@ -136,8 +136,6 @@ async fn instance_is_running(id: &str) -> bool {
 pub struct LimaBackend;
 
 impl SandboxBackend for LimaBackend {
-    const BINARY: &'static str = "limactl";
-
     async fn resolve_id() -> Result<(String, PathBuf, PathBuf), color_eyre::Report> {
         resolve_workspace_context().await
     }
@@ -158,7 +156,6 @@ impl SandboxBackend for LimaBackend {
         let needs_provision = profile_name != "base";
 
         if !instance_exists(&id).await {
-            ui::log_info("creating lima instance");
             if !ui::is_quiet() {
                 eprintln!("creating sandbox {}...", id);
             }
@@ -259,10 +256,10 @@ impl SandboxBackend for LimaBackend {
 
         if needs_provision {
             if !ui::is_quiet() {
-                eprintln!("resolving engine model...");
+                eprintln!("resolving model...");
             }
             let cfg = config::load().await?;
-            let server_port = cfg.server_port.unwrap_or(8080);
+            let server_port = cfg.server_port.unwrap_or(9931);
             let engine_name = cfg.default_engine_runtime.as_deref().unwrap_or("llama");
             let (active_model, ctx_window) =
                 crate::sandbox::shared::resolve_active_model_and_ctx_impl(engine_name).await?;
@@ -367,7 +364,9 @@ impl SandboxBackend for LimaBackend {
             lifecycle::acquire("lima-lifecycle", std::time::Duration::from_secs(20)).await?;
 
         if !instance_exists(&id).await {
-            ui::log_info("creating lima instance");
+            if !ui::is_quiet() {
+                eprintln!("creating sandbox {}...", id);
+            }
             if ui::is_verbose() {
                 let status = tokio::time::timeout(
                     std::time::Duration::from_secs(300),
@@ -452,7 +451,7 @@ impl SandboxBackend for LimaBackend {
         {
             let home = std::env::var("HOME")?;
             let cfg = config::load().await?;
-            let server_port = cfg.server_port.unwrap_or(8080);
+            let server_port = cfg.server_port.unwrap_or(9931);
             let engine_name = cfg.default_engine_runtime.as_deref().unwrap_or("llama");
             let (active_model, ctx_window) =
                 crate::sandbox::shared::resolve_active_model_and_ctx_impl(engine_name).await?;
@@ -786,9 +785,9 @@ pub async fn resolve_workspace_context() -> Result<(String, PathBuf, PathBuf), c
         v
     } else if let Ok(cfg) = config::load().await {
         cfg.workspace_root
-            .unwrap_or_else(|| format!("{}/src", home))
+            .unwrap_or_else(|| format!("{}/code", home))
     } else {
-        format!("{}/src", home)
+        format!("{}/code", home)
     };
 
     let workspace_root = raw_workspace_root

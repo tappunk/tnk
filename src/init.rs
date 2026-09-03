@@ -6,7 +6,7 @@ pub struct InitCommands {
     pub force: bool,
 }
 
-const MANAGED_DIRS: &[&str] = &["clients", "sandbox.d", "provider.d"];
+const MANAGED_DIRS: &[&str] = &["sandbox.d"];
 
 pub fn run(cmd: InitCommands) -> Result<(), color_eyre::Report> {
     let config_dir = get_config_dir()?;

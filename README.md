@@ -23,24 +23,30 @@
 brew tap tappunk/tap              # or: cargo install tnk
 brew trust tappunk/tap            # required on recent Homebrew versions
 brew install tappunk/tap/tnk
-tnk init                          # populate config from tnk-specs
+tnk init                          # populate ~/.config/tnk from tnk-specs
 tnk config init                   # create ~/.config/tnk/tnk.toml
-tnk run                           # start project sandbox
 ```
 
-Then enter a project sandbox:
+Point `default_model` at the model your host inference server serves:
+
+```toml
+# ~/.config/tnk/tnk.toml
+default_model = "ai-fast"
+```
+
+Then start and enter a project sandbox:
 
 ```bash
 cd ~/code/myproject
-tnk sandbox start                 # auto installs default provision
+tnk sandbox start                 # boots VM, provisions the default profile
 tnk sandbox shell
 ```
 
-The agent runs in an isolated sandbox that mounts only the project workspace. Host secrets and keys stay out of scope. Inference runs on the host; the sandbox gets endpoint and model coordinates via environment variables (`TNK_INFERENCE_URL`, `TNK_OPENAI_URL`, `TNK_MODEL_NAME`, `TNK_ENGINE_RUNTIME`, ...).
+The agent runs in an isolated sandbox that mounts only the project workspace. Host secrets and keys stay out of scope. Inference runs on the host (tnk does not manage the engine); the sandbox gets endpoint and model coordinates via environment variables (`TNK_INFERENCE_URL`, `TNK_MODEL_NAME`, `TNK_ENGINE_RUNTIME`).
 
 ## What tnk does
 
-- **Sandbox isolation**: one per-project sandbox VM, mounting only the workspace directory
+- **Sandbox isolation**: one per-project Lima VM, mounting only the workspace directory
 - **Provisioning**: declarative per-profile provisioning from `sandbox.d/provision.d`
 - **Session audit trail**: optional NDJSON logs for forensic review
 - **Machine-readable output**: `--output json|ndjson` on list commands
@@ -51,7 +57,7 @@ The agent runs in an isolated sandbox that mounts only the project workspace. Ho
 tnk                # list sandboxes
 tnk run            # start project sandbox
 tnk sandbox shell  # enter project sandbox
-tnk shutdown       # tear down all sandboxes
+tnk shutdown       # stop all sandboxes
 tnk doctor         # health checks
 tnk config show    # inspect effective config
 ```

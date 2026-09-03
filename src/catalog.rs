@@ -1,8 +1,6 @@
 use std::path::{Path, PathBuf};
 use tokio::fs;
 
-const EXCLUDED_PROFILES: &[&str] = &["provision-lib"];
-
 #[derive(Debug, Clone)]
 pub struct Profile {
     pub name: String,
@@ -23,7 +21,7 @@ pub async fn list_profiles(config_dir: &Path) -> Result<Vec<Profile>, color_eyre
                     .and_then(|s| s.to_str())
                     .unwrap_or_default()
                     .to_string();
-                if name.is_empty() || EXCLUDED_PROFILES.contains(&name.as_str()) {
+                if name.is_empty() {
                     continue;
                 }
                 profiles.push(Profile {
@@ -44,22 +42,13 @@ pub fn resolve_manifest(config_dir: &Path, profile_name: &str) -> Option<PathBuf
     if profile_specific.is_file() {
         return Some(profile_specific);
     }
-    let profile_sandbox = manifests_dir.join(format!("{}-sandbox.yaml", profile_name));
-    if profile_sandbox.is_file() {
-        return Some(profile_sandbox);
-    }
-    let base = manifests_dir.join("base-sandbox.yaml");
+    let base = manifests_dir.join("base.yaml");
     if base.is_file() {
-        crate::ui::log_warn(&format!(
-            "no manifest for profile '{}', falling back to base",
-            profile_name
-        ));
-        Some(base)
-    } else {
-        crate::ui::log_warn(&format!(
-            "no manifest for profile '{}' and base-sandbox.yaml is missing",
-            profile_name
-        ));
-        None
+        return Some(base);
     }
+    crate::ui::log_warn(&format!(
+        "no manifest for profile '{}' and base.yaml is missing",
+        profile_name
+    ));
+    None
 }

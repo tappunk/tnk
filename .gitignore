@@ -1,0 +1,4 @@
+*.lock
+.env
+*.swpx
+tnk.code-workspace

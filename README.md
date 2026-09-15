@@ -1,9 +1,9 @@
 <div align="center">
   <img src="https://raw.githubusercontent.com/tappunk/.github/refs/heads/main/assets/tnk.webp" alt="tnk" width="280"/>
 
-# tnk (experimental)
+# tnk
 
-**Zero-trust per-project sandbox VMs for AI agent runtimes.**
+**Zero-trust per-project sandbox VMs for AI agent runtimes.** A personal tool for my own workflow, not a product. Expect breaking changes and best-effort maintenance.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-orange.svg)](LICENSE)
 [![Crates.io](https://img.shields.io/crates/v/tnk?color=orange)](https://crates.io/crates/tnk)
@@ -69,3 +69,5 @@ Config lives at `~/.config/tnk/tnk.toml`.
 ## Security
 
 Agents execute package installers, shell commands, and network clients with broad filesystem access. tnk keeps that execution inside isolated sandbox VMs, mounts only the project workspace, and exposes inference endpoints via explicit environment variables.
+
+tnk is a personal tool, not a security product. Do not treat it as a validated security boundary.

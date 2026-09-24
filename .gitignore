@@ -1,0 +1,4 @@
+/target
+.env
+*.swpx
+tnk.code-workspace
